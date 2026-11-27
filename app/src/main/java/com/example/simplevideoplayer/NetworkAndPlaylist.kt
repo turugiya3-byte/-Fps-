@@ -179,14 +179,15 @@ class SmbMediaDataSource(
         if (toRead <= 0) return C.RESULT_END_OF_INPUT
 
         return try {
+            // smbj の file.read(byte[] dest, int destOffset, long fileOffset, int length)
             val readBytes = file.read(buffer, offset, readPosition, toRead)
             if (readBytes <= 0) {
                 bytesRemaining = 0L
                 C.RESULT_END_OF_INPUT
             } else {
-                readPosition += readBytes
+                readPosition += readBytes.toLong()
                 if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-                    bytesRemaining -= readBytes
+                    bytesRemaining -= readBytes.toLong()
                 }
                 bytesTransferred(readBytes)
                 readBytes
@@ -553,55 +554,3 @@ object NetworkDiscoveryManager {
             client.connect(host).use { connection ->
                 val authCtx = if (credentials.shouldUseAnonymous()) {
                     AuthenticationContext.anonymous()
-                } else {
-                    AuthenticationContext(
-                        credentials.username,
-                        credentials.password.toCharArray(),
-                        credentials.domain
-                    )
-                }
-                val session = connection.authenticate(authCtx)
-                (session.connectShare(credentials.shareName) as DiskShare).use { share ->
-                    val normalizedPath = subPath.trim('/')
-                    val list = share.list(normalizedPath)
-                        .filter { info ->
-                            val name = info.fileName
-                            name != "." && name != ".."
-                        }
-                        .mapNotNull { info ->
-                            val name = info.fileName
-                            val isDir = (info.fileAttributes and 0x10L) != 0L
-                            val nextRelPath = if (normalizedPath.isBlank()) name else "$normalizedPath/$name"
-                            if (isDir) {
-                                ExplorerEntry(
-                                    name = name,
-                                    isDirectory = true,
-                                    objectIdOrPath = nextRelPath
-                                )
-                            } else if (isVideoFileName(name)) {
-                                ExplorerEntry(
-                                    name = name,
-                                    isDirectory = false,
-                                    objectIdOrPath = nextRelPath,
-                                    streamUrl = "smb://$host/${credentials.shareName}/$nextRelPath"
-                                )
-                            } else {
-                                null
-                            }
-                        }
-                        .sortedWith(compareBy<ExplorerEntry> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) })
-                    Result.success(list)
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        } finally {
-            try {
-                client.close()
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    fun buildDirectUri(rawPath: String): Uri = Uri.parse(rawPath.trim())
-}
