@@ -22,18 +22,25 @@ enum class NoiseReductionLevel(val label: String, val strength: Float) {
     LARGE("ノイズ大", 1.0f)
 }
 
+enum class UpconvertMode(val label: String, val strength: Float) {
+    OFF("アップコンバートOFF", 0.0f),
+    LIGHT("アップコンバート標準", 0.45f),
+    STRONG("アップコンバート強", 0.85f)
+}
+
 data class FilterPreset(
     val label: String,
     val saturation: Float,
     val contrast: Float,
     val sharpness: Float,
+    val clarity: Float,
     val blackLift: Float
 ) {
     companion object {
-        val STANDARD = FilterPreset("標準", 1.0f, 1.0f, 0.0f, 0.0f)
-        val OLED = FilterPreset("OLED", 1.18f, 1.18f, 0.25f, 0.03f)
-        val ANIME = FilterPreset("アニメ", 1.28f, 1.12f, 0.65f, 0.01f)
-        val LIVE_ACTION = FilterPreset("実写", 1.06f, 1.08f, 0.30f, 0.01f)
+        val STANDARD = FilterPreset("標準", 1.0f, 1.0f, 0.0f, 0.0f, 0.0f)
+        val OLED = FilterPreset("OLED", 1.18f, 1.18f, 0.25f, 0.20f, 0.03f)
+        val ANIME = FilterPreset("アニメ", 1.28f, 1.12f, 0.65f, 0.25f, 0.01f)
+        val LIVE_ACTION = FilterPreset("実写", 1.06f, 1.08f, 0.30f, 0.35f, 0.01f)
         val entries = listOf(STANDARD, OLED, ANIME, LIVE_ACTION)
     }
 }
@@ -42,8 +49,10 @@ data class FilterPreset(
 private class ImageEnhanceEffect(
     private val saturation: Float,
     private val sharpness: Float,
+    private val clarity: Float,
     private val blackLift: Float,
-    private val noiseStrength: Float
+    private val noiseStrength: Float,
+    private val upconvertStrength: Float
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram {
@@ -51,8 +60,10 @@ private class ImageEnhanceEffect(
             useHdr = useHdr,
             saturation = saturation,
             sharpness = sharpness,
+            clarity = clarity,
             blackLift = blackLift,
-            noiseStrength = noiseStrength
+            noiseStrength = noiseStrength,
+            upconvertStrength = upconvertStrength
         )
     }
 
@@ -61,15 +72,19 @@ private class ImageEnhanceEffect(
         if (other !is ImageEnhanceEffect) return false
         return saturation == other.saturation &&
             sharpness == other.sharpness &&
+            clarity == other.clarity &&
             blackLift == other.blackLift &&
-            noiseStrength == other.noiseStrength
+            noiseStrength == other.noiseStrength &&
+            upconvertStrength == other.upconvertStrength
     }
 
     override fun hashCode(): Int {
         var result = saturation.hashCode()
         result = 31 * result + sharpness.hashCode()
+        result = 31 * result + clarity.hashCode()
         result = 31 * result + blackLift.hashCode()
         result = 31 * result + noiseStrength.hashCode()
+        result = 31 * result + upconvertStrength.hashCode()
         return result
     }
 }
@@ -79,8 +94,10 @@ private class ImageEnhanceShaderProgram(
     useHdr: Boolean,
     private val saturation: Float,
     private val sharpness: Float,
+    private val clarity: Float,
     private val blackLift: Float,
-    private val noiseStrength: Float
+    private val noiseStrength: Float,
+    private val upconvertStrength: Float
 ) : BaseGlShaderProgram(useHdr, 1) {
 
     private val vertexShaderCode = """
@@ -104,8 +121,10 @@ private class ImageEnhanceShaderProgram(
         uniform vec2 uTexelSize;
         uniform float uSaturation;
         uniform float uSharpness;
+        uniform float uClarity;
         uniform float uBlackLift;
         uniform float uNoiseStrength;
+        uniform float uUpconvert;
 
         // ブロックノイズ軽減（8pxマクロブロック境界の段差緩和＋エッジ保持）
         vec3 applyDeblockFilter(vec2 uv, vec2 texel, float strength) {
@@ -113,7 +132,6 @@ private class ImageEnhanceShaderProgram(
             if (strength <= 0.001) return c;
 
             vec2 pixelCoord = uv / texel;
-            // 8x8 ブロック境界への近さ（0.0 = 境界上, 1.0 = ブロック中央）
             vec2 blockMod = mod(pixelCoord, 8.0);
             vec2 distToBoundary = min(blockMod, 8.0 - blockMod);
             float boundaryWeightX = 1.0 - smoothstep(0.0, 2.0, distToBoundary.x);
@@ -130,12 +148,10 @@ private class ImageEnhanceShaderProgram(
             vec3 n2 = texture(uTexSampler, uv + vec2(0.0, -2.0 * texel.y)).rgb;
             vec3 s2 = texture(uTexSampler, uv + vec2(0.0,  2.0 * texel.y)).rgb;
 
-            // ブロック境界をまたぐ平均（横・縦・広域）
             vec3 hAvg = (w2 + w + c + e + e2) / 5.0;
             vec3 vAvg = (n2 + n + c + s + s2) / 5.0;
             vec3 deblockAvg = mix(c, (hAvg + vAvg) * 0.5, 0.5 + 0.5 * boundaryBoost);
 
-            // 強い本物の輪郭は残し、弱いブロック段差だけを抑える
             float localDiff = length(deblockAvg - c);
             float edgeKeep = 1.0 - smoothstep(0.06, 0.28, localDiff);
             float effectiveBlend = clamp(strength * (0.45 + 0.55 * boundaryBoost) * edgeKeep, 0.0, 0.92);
@@ -143,17 +159,54 @@ private class ImageEnhanceShaderProgram(
             return mix(c, deblockAvg, effectiveBlend);
         }
 
+        // 高画質化・アップコンバート（輪郭復元＋明瞭度＋バンディング軽減）
+        vec3 applyHighQualityUpconvert(vec2 uv, vec2 texel, vec3 baseColor, float upStrength, float clarityAmt) {
+            vec3 n = texture(uTexSampler, uv + vec2(0.0, -texel.y)).rgb;
+            vec3 s = texture(uTexSampler, uv + vec2(0.0,  texel.y)).rgb;
+            vec3 w = texture(uTexSampler, uv + vec2(-texel.x, 0.0)).rgb;
+            vec3 e = texture(uTexSampler, uv + vec2( texel.x, 0.0)).rgb;
+
+            vec3 nw = texture(uTexSampler, uv + vec2(-texel.x, -texel.y)).rgb;
+            vec3 ne = texture(uTexSampler, uv + vec2( texel.x, -texel.y)).rgb;
+            vec3 sw = texture(uTexSampler, uv + vec2(-texel.x,  texel.y)).rgb;
+            vec3 se = texture(uTexSampler, uv + vec2( texel.x,  texel.y)).rgb;
+
+            vec3 nearAvg = (n + s + w + e) * 0.25;
+            vec3 diagAvg = (nw + ne + sw + se) * 0.25;
+            vec3 wideAvg = (nearAvg + diagAvg) * 0.5;
+
+            // バンディング軽減：ごく微小な輝度差（色帯）だけ滑らかに馴染ませる
+            float bandDiff = length(wideAvg - baseColor);
+            float bandMask = 1.0 - smoothstep(0.005, 0.035, bandDiff);
+            vec3 result = mix(baseColor, wideAvg, bandMask * 0.22 * max(upStrength, clarityAmt));
+
+            // アップコンバート：輪郭方向の差を強調して精細感を復元
+            if (upStrength > 0.001) {
+                vec3 detail = result - nearAvg;
+                result = result + detail * (upStrength * 1.15);
+            }
+
+            // 明瞭度（中域コントラスト）：広域平均との差分で立体感を出す
+            if (abs(clarityAmt) > 0.001) {
+                vec3 midDetail = result - wideAvg;
+                result = result + midDetail * (clarityAmt * 0.85);
+            }
+
+            return result;
+        }
+
         void main() {
             vec3 deblocked = applyDeblockFilter(vTexCoords, uTexelSize, uNoiseStrength);
+            vec3 hqColor = applyHighQualityUpconvert(vTexCoords, uTexelSize, deblocked, uUpconvert, uClarity);
 
             vec3 n = texture(uTexSampler, vTexCoords + vec2(0.0, -uTexelSize.y)).rgb;
             vec3 s = texture(uTexSampler, vTexCoords + vec2(0.0,  uTexelSize.y)).rgb;
             vec3 w = texture(uTexSampler, vTexCoords + vec2(-uTexelSize.x, 0.0)).rgb;
             vec3 e = texture(uTexSampler, vTexCoords + vec2( uTexelSize.x, 0.0)).rgb;
 
-            // シャープネス適用（ブロックノイズ除去後の映像をくっきりさせる）
+            // 仕上げシャープネス
             vec3 crossAvg = (n + s + w + e) * 0.25;
-            vec3 sharpened = deblocked + (deblocked - crossAvg) * (uSharpness * 1.5);
+            vec3 sharpened = hqColor + (hqColor - crossAvg) * (uSharpness * 1.5);
 
             // 彩度調整
             float luma = dot(sharpened, vec3(0.2126, 0.7152, 0.0722));
@@ -223,7 +276,7 @@ private class ImageEnhanceShaderProgram(
         val compiled = IntArray(1)
         GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
         if (compiled[0] == 0) {
-            val info = GLES20.glGetShaderInfoLog(shader)
+            val info = GLES30.glGetShaderInfoLog(shader)
             GLES30.glDeleteShader(shader)
             throw RuntimeException("Compile failed: $info")
         }
@@ -253,11 +306,17 @@ private class ImageEnhanceShaderProgram(
         val shpLoc = GLES20.glGetUniformLocation(program, "uSharpness")
         if (shpLoc >= 0) GLES20.glUniform1f(shpLoc, sharpness)
 
+        val clrLoc = GLES20.glGetUniformLocation(program, "uClarity")
+        if (clrLoc >= 0) GLES20.glUniform1f(clrLoc, clarity)
+
         val blkLoc = GLES20.glGetUniformLocation(program, "uBlackLift")
         if (blkLoc >= 0) GLES20.glUniform1f(blkLoc, blackLift)
 
         val noiseLoc = GLES20.glGetUniformLocation(program, "uNoiseStrength")
         if (noiseLoc >= 0) GLES20.glUniform1f(noiseLoc, noiseStrength)
+
+        val upLoc = GLES20.glGetUniformLocation(program, "uUpconvert")
+        if (upLoc >= 0) GLES20.glUniform1f(upLoc, upconvertStrength)
 
         quadBuffer.position(0)
         GLES20.glEnableVertexAttribArray(0)
@@ -288,8 +347,10 @@ fun buildVideoEffectsList(
     saturation: Float,
     contrast: Float,
     sharpness: Float,
+    clarity: Float,
     blackLift: Float,
-    noiseLevel: NoiseReductionLevel
+    noiseLevel: NoiseReductionLevel,
+    upconvertMode: UpconvertMode
 ): List<Effect> {
     val result = mutableListOf<Effect>()
     val media3Contrast = (contrast - 1.0f).coerceIn(-0.9f, 0.9f)
@@ -299,16 +360,20 @@ fun buildVideoEffectsList(
 
     val needsCustomGl = abs(saturation - 1.0f) > 0.005f ||
         abs(sharpness) > 0.005f ||
+        abs(clarity) > 0.005f ||
         abs(blackLift) > 0.001f ||
-        noiseLevel != NoiseReductionLevel.OFF
+        noiseLevel != NoiseReductionLevel.OFF ||
+        upconvertMode != UpconvertMode.OFF
 
     if (needsCustomGl) {
         result.add(
             ImageEnhanceEffect(
                 saturation = saturation,
                 sharpness = sharpness,
+                clarity = clarity,
                 blackLift = blackLift,
-                noiseStrength = noiseLevel.strength
+                noiseStrength = noiseLevel.strength,
+                upconvertStrength = upconvertMode.strength
             )
         )
     }
