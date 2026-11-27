@@ -109,7 +109,6 @@ fun MxStyleVideoPlayerScreen() {
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var interactionTick by remember { mutableIntStateOf(0) }
 
-    // 輝度・音量・シークのポップアップHUD状態
     var activeHud by remember { mutableStateOf<GestureHudType?>(null) }
     var brightnessLevel by remember {
         mutableFloatStateOf(
@@ -140,7 +139,6 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    // 全画面（システムバー表示/非表示）の反映
     LaunchedEffect(isFullscreen) {
         activity?.window?.let { win ->
             WindowCompat.setDecorFitsSystemWindows(win, !isFullscreen)
@@ -178,7 +176,6 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    // 再生位置の定期更新
     LaunchedEffect(exoPlayer) {
         while (true) {
             currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
@@ -187,7 +184,6 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    // 再生中は4秒操作がないと自動でコントロールを隠す
     LaunchedEffect(controlsVisible, isPlaying, isLocked, interactionTick) {
         if (controlsVisible && isPlaying && !isLocked) {
             delay(4000L)
@@ -195,7 +191,6 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    // ジェスチャーHUDを1.2秒後に自動で消す
     LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale) {
         if (activeHud != null) {
             delay(1200L)
@@ -225,7 +220,6 @@ fun MxStyleVideoPlayerScreen() {
                 interactionTick++
             }
     ) {
-        // 1. 映像表示レイヤー（拡大・クロップ・パン対応）
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -251,7 +245,6 @@ fun MxStyleVideoPlayerScreen() {
             )
         }
 
-        // 2. MX Player風スワイプ＆ピンチ操作レイヤー（ロック中は無効）
         if (!isLocked) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val halfWidthPx = constraints.maxWidth * 0.5f
@@ -260,7 +253,6 @@ fun MxStyleVideoPlayerScreen() {
                 var dragStartX by remember { mutableFloatStateOf(0f) }
                 var dragStartPosMs by remember { mutableLongStateOf(0L) }
 
-                // 2本指ピンチ拡大＆拡大時のパン移動
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -283,7 +275,6 @@ fun MxStyleVideoPlayerScreen() {
                         }
                 )
 
-                // 上下スワイプ：左半分＝輝度、右半分＝音量
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -323,7 +314,6 @@ fun MxStyleVideoPlayerScreen() {
                         }
                 )
 
-                // 左右スワイプ：シーク移動（ピンチ拡大中はパン操作を優先）
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -361,7 +351,6 @@ fun MxStyleVideoPlayerScreen() {
             }
         }
 
-        // 3. 中央ポップアップHUD（輝度・音量・シーク・拡大倍率表示）
         AnimatedVisibility(
             visible = activeHud != null && !isLocked,
             enter = fadeIn(),
@@ -419,7 +408,6 @@ fun MxStyleVideoPlayerScreen() {
             }
         }
 
-        // 4. 画面ロック中の解除ボタン
         if (isLocked) {
             AnimatedVisibility(
                 visible = controlsVisible,
@@ -443,7 +431,6 @@ fun MxStyleVideoPlayerScreen() {
             return@Box
         }
 
-        // 5. MX Player風 コントロールオーバーレイ
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
@@ -464,7 +451,6 @@ fun MxStyleVideoPlayerScreen() {
                     )
                     .then(if (!isFullscreen) Modifier.systemBarsPadding() else Modifier)
             ) {
-                // 上部バー：ロック・タイトル・表示モード（フィット/クロップ/拡大）・全画面・開く
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -475,4 +461,16 @@ fun MxStyleVideoPlayerScreen() {
                 ) {
                     IconButton(
                         onClick = {
-  
+                            isLocked = true
+                            controlsVisible = true
+                            interactionTick++
+                        }
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = "画面ロック", tint = Color.White)
+                    }
+
+                    Text(
+                        text = videoTitle,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                   
