@@ -144,7 +144,7 @@ class SmbMediaDataSource(
             val totalSize = handle.fileInformation.standardInformation.endOfFile
             val startPos = dataSpec.position
             if (startPos > totalSize) {
-                throw IOException("シーク位置がファイルサイズを超えています ($startPos >$totalSize)")
+                throw IOException("シーク位置がファイルサイズを超えています ($startPos > $totalSize)")
             }
 
             smbClient = client
@@ -179,7 +179,6 @@ class SmbMediaDataSource(
         if (toRead <= 0) return C.RESULT_END_OF_INPUT
 
         return try {
-            // smbj の file.read(byte[] dest, int destOffset, long fileOffset, int length)
             val readBytes = file.read(buffer, offset, readPosition, toRead)
             if (readBytes <= 0) {
                 bytesRemaining = 0L
@@ -234,6 +233,8 @@ object NetworkDiscoveryManager {
         val lower = name.lowercase(Locale.US)
         return videoExtensions.any { lower.endsWith(it) }
     }
+
+    fun buildDirectUri(rawPath: String): Uri = Uri.parse(rawPath.trim())
 
     suspend fun discoverDevices(context: Context): List<DiscoveredNetworkDevice> =
         withContext(Dispatchers.IO) {
@@ -554,3 +555,56 @@ object NetworkDiscoveryManager {
             client.connect(host).use { connection ->
                 val authCtx = if (credentials.shouldUseAnonymous()) {
                     AuthenticationContext.anonymous()
+                } else {
+                    AuthenticationContext(
+                        credentials.username,
+                        credentials.password.toCharArray(),
+                        credentials.domain
+                    )
+                }
+                val session = connection.authenticate(authCtx)
+                (session.connectShare(credentials.shareName) as DiskShare).use { share ->
+                    val normalizedPath = subPath.trim('/')
+                    val list = share.list(normalizedPath)
+                        .filter { info ->
+                            val name = info.fileName
+                            name != "." && name != ".."
+                        }
+                        .mapNotNull { info ->
+                            val name = info.fileName
+                            val isDir = (info.fileAttributes and 0x10L) != 0L
+                            val nextRelPath = if (normalizedPath.isBlank()) name else "$normalizedPath/$name"
+                            if (isDir) {
+                                ExplorerEntry(
+                                    name = name,
+                                    isDirectory = true,
+                                    objectIdOrPath = nextRelPath
+                                )
+                            } else if (isVideoFileName(name)) {
+                                ExplorerEntry(
+                                    name = name,
+                                    isDirectory = false,
+                                    objectIdOrPath = nextRelPath,
+                                    streamUrl = "smb://$host/${credentials.shareName}/$nextRelPath"
+                                )
+                            } else {
+                                null
+                            }
+                        }
+                        .sortedWith(
+                            compareBy<ExplorerEntry> { !it.isDirectory }
+                                .thenBy { it.name.lowercase(Locale.US) }
+                        )
+                    Result.success(list)
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try {
+                client.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
