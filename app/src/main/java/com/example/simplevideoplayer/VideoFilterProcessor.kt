@@ -2,6 +2,7 @@ package com.example.simplevideoplayer
 
 import android.content.Context
 import android.opengl.GLES20
+import android.opengl.GLES30
 import androidx.media3.common.Effect
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.UnstableApi
@@ -124,17 +125,14 @@ private class ImageEnhanceShaderProgram(
             vec3 sw = texture(uTexSampler, vTexCoords + vec2(-uTexelSize.x,  uTexelSize.y)).rgb;
             vec3 se = texture(uTexSampler, vTexCoords + vec2( uTexelSize.x,  uTexelSize.y)).rgb;
 
-            // 9点平均によるノイズ軽減（エッジ差が大きい画素は重みを下げて輪郭を保持）
             vec3 box9 = (c + n + s + w + e + nw + ne + sw + se) / 9.0;
             float diffMag = length(box9 - c);
             float edgePreserve = clamp(1.0 - diffMag * 3.5, 0.15, 1.0);
             vec3 denoised = mix(c, box9, clamp(uNoiseStrength * 0.85 * edgePreserve, 0.0, 0.85));
 
-            // シャープネス適用
             vec3 crossAvg = (n + s + w + e) * 0.25;
             vec3 sharpened = denoised + (denoised - crossAvg) * (uSharpness * 1.5);
 
-            // AI HDR トーンマッピング（暗部持ち上げ＋S字コントラスト＋彩度ブースト）
             vec3 hdrAdjusted = sharpened;
             if (uAiHdr > 0.5) {
                 vec3 shadowLift = pow(clamp(hdrAdjusted, 0.0, 1.0), vec3(0.78));
@@ -143,11 +141,9 @@ private class ImageEnhanceShaderProgram(
                 hdrAdjusted = mix(vec3(hdrLuma), sCurve, 1.22);
             }
 
-            // 彩度調整
             float luma = dot(hdrAdjusted, vec3(0.2126, 0.7152, 0.0722));
             vec3 satColor = mix(vec3(luma), hdrAdjusted, uSaturation);
 
-            // 黒浮き抑制
             vec3 lifted = max(satColor - vec3(uBlackLift), vec3(0.0));
             if (uBlackLift > 0.001) {
                 lifted = lifted / max(1.0 - uBlackLift, 0.05);
@@ -200,19 +196,19 @@ private class ImageEnhanceShaderProgram(
                 throw RuntimeException("Link failed: $info")
             }
         }
-        GLES30.glDeleteShader(vs)
-        GLES30.glDeleteShader(fs)
+        GLES20.glDeleteShader(vs)
+        GLES20.glDeleteShader(fs)
     }
 
     private fun compileShader(type: Int, code: String): Int {
-        val shader = GLES30.glCreateShader(type)
-        GLES30.glShaderSource(shader, code)
-        GLES30.glCompileShader(shader)
+        val shader = GLES20.glCreateShader(type)
+        GLES20.glShaderSource(shader, code)
+        GLES20.glCompileShader(shader)
         val compiled = IntArray(1)
-        GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, compiled, 0)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
         if (compiled[0] == 0) {
-            val info = GLES30.glGetShaderInfoLog(shader)
-            GLES30.glDeleteShader(shader)
+            val info = GLES20.glGetShaderInfoLog(shader)
+            GLES20.glDeleteShader(shader)
             throw RuntimeException("Compile failed: $info")
         }
         return shader
@@ -225,49 +221,49 @@ private class ImageEnhanceShaderProgram(
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-        GLES30.glUseProgram(program)
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexId)
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
 
-        val texLoc = GLES30.glGetUniformLocation(program, "uTexSampler")
-        if (texLoc >= 0) GLES30.glUniform1i(texLoc, 0)
+        val texLoc = GLES20.glGetUniformLocation(program, "uTexSampler")
+        if (texLoc >= 0) GLES20.glUniform1i(texLoc, 0)
 
-        val texelLoc = GLES30.glGetUniformLocation(program, "uTexelSize")
-        if (texelLoc >= 0) GLES30.glUniform2f(texelLoc, 1f / texWidth, 1f / texHeight)
+        val texelLoc = GLES20.glGetUniformLocation(program, "uTexelSize")
+        if (texelLoc >= 0) GLES20.glUniform2f(texelLoc, 1f / texWidth, 1f / texHeight)
 
-        val satLoc = GLES30.glGetUniformLocation(program, "uSaturation")
-        if (satLoc >= 0) GLES30.glUniform1f(satLoc, saturation)
+        val satLoc = GLES20.glGetUniformLocation(program, "uSaturation")
+        if (satLoc >= 0) GLES20.glUniform1f(satLoc, saturation)
 
-        val shpLoc = GLES30.glGetUniformLocation(program, "uSharpness")
-        if (shpLoc >= 0) GLES30.glUniform1f(shpLoc, sharpness)
+        val shpLoc = GLES20.glGetUniformLocation(program, "uSharpness")
+        if (shpLoc >= 0) GLES20.glUniform1f(shpLoc, sharpness)
 
-        val blkLoc = GLES30.glGetUniformLocation(program, "uBlackLift")
-        if (blkLoc >= 0) GLES30.glUniform1f(blkLoc, blackLift)
+        val blkLoc = GLES20.glGetUniformLocation(program, "uBlackLift")
+        if (blkLoc >= 0) GLES20.glUniform1f(blkLoc, blackLift)
 
-        val noiseLoc = GLES30.glGetUniformLocation(program, "uNoiseStrength")
-        if (noiseLoc >= 0) GLES30.glUniform1f(noiseLoc, noiseStrength)
+        val noiseLoc = GLES20.glGetUniformLocation(program, "uNoiseStrength")
+        if (noiseLoc >= 0) GLES20.glUniform1f(noiseLoc, noiseStrength)
 
-        val hdrLoc = GLES30.glGetUniformLocation(program, "uAiHdr")
-        if (hdrLoc >= 0) GLES30.glUniform1f(hdrLoc, if (aiHdrEnabled) 1.0f else 0.0f)
+        val hdrLoc = GLES20.glGetUniformLocation(program, "uAiHdr")
+        if (hdrLoc >= 0) GLES20.glUniform1f(hdrLoc, if (aiHdrEnabled) 1.0f else 0.0f)
 
         quadBuffer.position(0)
-        GLES30.glEnableVertexAttribArray(0)
-        GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, quadBuffer)
+        GLES20.glEnableVertexAttribArray(0)
+        GLES20.glVertexAttribPointer(0, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
 
         quadBuffer.position(2)
-        GLES30.glEnableVertexAttribArray(1)
-        GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 16, quadBuffer)
+        GLES20.glEnableVertexAttribArray(1)
+        GLES20.glVertexAttribPointer(1, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
 
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-        GLES30.glDisableVertexAttribArray(0)
-        GLES30.glDisableVertexAttribArray(1)
+        GLES20.glDisableVertexAttribArray(0)
+        GLES20.glDisableVertexAttribArray(1)
     }
 
     override fun release() {
         super.release()
         if (program != 0) {
-            GLES30.glDeleteProgram(program)
+            GLES20.glDeleteProgram(program)
             program = 0
         }
     }
