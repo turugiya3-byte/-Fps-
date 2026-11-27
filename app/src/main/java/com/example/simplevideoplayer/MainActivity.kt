@@ -20,9 +20,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,7 +58,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private enum class GestureHudType {
-    BRIGHTNESS, VOLUME, SEEK, ZOOM, PRESET
+    BRIGHTNESS, VOLUME, SEEK, ZOOM, PRESET, NOISE, HDR
 }
 
 private enum class ViewScaleMode(val label: String, val zoomScale: Float) {
@@ -117,6 +117,8 @@ fun MxStyleVideoPlayerScreen() {
     var contrast by remember { mutableFloatStateOf(FilterPreset.STANDARD.contrast) }
     var sharpness by remember { mutableFloatStateOf(FilterPreset.STANDARD.sharpness) }
     var blackLift by remember { mutableFloatStateOf(FilterPreset.STANDARD.blackLift) }
+    var noiseLevel by remember { mutableStateOf(NoiseReductionLevel.OFF) }
+    var aiHdrEnabled by remember { mutableStateOf(false) }
 
     var activeHud by remember { mutableStateOf<GestureHudType?>(null) }
     var brightnessLevel by remember {
@@ -158,13 +160,15 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(saturation, contrast, sharpness, blackLift) {
+    LaunchedEffect(saturation, contrast, sharpness, blackLift, noiseLevel, aiHdrEnabled) {
         val effects = buildVideoEffectsList(
             context = context,
             saturation = saturation,
             contrast = contrast,
             sharpness = sharpness,
-            blackLift = blackLift
+            blackLift = blackLift,
+            noiseLevel = noiseLevel,
+            aiHdrEnabled = aiHdrEnabled
         )
         exoPlayer.setVideoEffects(effects)
     }
@@ -221,7 +225,7 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale, selectedPresetLabel) {
+    LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale, selectedPresetLabel, noiseLevel, aiHdrEnabled) {
         if (activeHud != null) {
             delay(1200L)
             activeHud = null
@@ -250,6 +254,7 @@ fun MxStyleVideoPlayerScreen() {
                 interactionTick++
             }
     ) {
+        // 1. 映像表示レイヤー
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -275,75 +280,69 @@ fun MxStyleVideoPlayerScreen() {
             )
         }
 
+        // 2. 左右エリア分離スワイプ＆ピンチ操作レイヤー
         if (!isLocked) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val halfWidthPx = constraints.maxWidth * 0.5f
                 val dragHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f) * 0.65f
                 val dragWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f) * 0.75f
-                var dragStartX by remember { mutableFloatStateOf(0f) }
                 var dragStartPosMs by remember { mutableLongStateOf(0L) }
 
+                // 左半分：上下スワイプで輝度調整
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.5f)
+                        .align(Alignment.CenterStart)
                         .pointerInput(isLocked) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                val nextZoom = (pinchScale * zoom).coerceIn(1.0f, 3.0f)
-                                pinchScale = nextZoom
-                                if (nextZoom > 1.01f) {
-                                    panOffset = Offset(
-                                        x = (panOffset.x + pan.x).coerceIn(-600f, 600f),
-                                        y = (panOffset.y + pan.y).coerceIn(-400f, 400f)
-                                    )
-                                } else {
-                                    panOffset = Offset.Zero
-                                }
-                                if (zoom != 1.0f) {
-                                    activeHud = GestureHudType.ZOOM
-                                }
-                            }
-                        }
-                )
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(isLocked, maxVolume) {
                             detectVerticalDragGestures(
-                                onDragStart = { offset ->
-                                    dragStartX = offset.x
-                                    activeHud = if (offset.x < halfWidthPx) {
-                                        GestureHudType.BRIGHTNESS
-                                    } else {
-                                        GestureHudType.VOLUME
-                                    }
+                                onDragStart = {
+                                    activeHud = GestureHudType.BRIGHTNESS
                                 },
                                 onDragEnd = { },
                                 onDragCancel = { },
                                 onVerticalDrag = { change, dragAmount ->
                                     change.consume()
                                     val delta = -dragAmount / dragHeightPx
-                                    if (dragStartX < halfWidthPx) {
-                                        val next = (brightnessLevel + delta).coerceIn(0.05f, 1.0f)
-                                        brightnessLevel = next
-                                        activity?.window?.let { win ->
-                                            val params = win.attributes
-                                            params.screenBrightness = next
-                                            win.attributes = params
-                                        }
-                                        activeHud = GestureHudType.BRIGHTNESS
-                                    } else {
-                                        val next = (volumeLevel + delta).coerceIn(0.0f, 1.0f)
-                                        volumeLevel = next
-                                        val targetVol = (next * maxVolume).roundToInt().coerceIn(0, maxVolume)
-                                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
-                                        activeHud = GestureHudType.VOLUME
+                                    val next = (brightnessLevel + delta).coerceIn(0.05f, 1.0f)
+                                    brightnessLevel = next
+                                    activity?.window?.let { win ->
+                                        val params = win.attributes
+                                        params.screenBrightness = next
+                                        win.attributes = params
                                     }
+                                    activeHud = GestureHudType.BRIGHTNESS
                                 }
                             )
                         }
                 )
 
+                // 右半分：上下スワイプで音量調整
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.5f)
+                        .align(Alignment.CenterEnd)
+                        .pointerInput(isLocked, maxVolume) {
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    activeHud = GestureHudType.VOLUME
+                                },
+                                onDragEnd = { },
+                                onDragCancel = { },
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    val delta = -dragAmount / dragHeightPx
+                                    val next = (volumeLevel + delta).coerceIn(0.0f, 1.0f)
+                                    volumeLevel = next
+                                    val targetVol = (next * maxVolume).roundToInt().coerceIn(0, maxVolume)
+                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
+                                    activeHud = GestureHudType.VOLUME
+                                }
+                            )
+                        }
+                )
+
+                // 左右スワイプ：シーク移動（ピンチ拡大中は無効）
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -378,9 +377,33 @@ fun MxStyleVideoPlayerScreen() {
                             )
                         }
                 )
+
+                // 2本指ピンチ拡大＆拡大時のパン移動
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(isLocked) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                val nextZoom = (pinchScale * zoom).coerceIn(1.0f, 3.0f)
+                                pinchScale = nextZoom
+                                if (nextZoom > 1.01f) {
+                                    panOffset = Offset(
+                                        x = (panOffset.x + pan.x).coerceIn(-600f, 600f),
+                                        y = (panOffset.y + pan.y).coerceIn(-400f, 400f)
+                                    )
+                                } else {
+                                    panOffset = Offset.Zero
+                                }
+                                if (zoom != 1.0f) {
+                                    activeHud = GestureHudType.ZOOM
+                                }
+                            }
+                        }
+                )
             }
         }
 
+        // 3. 中央ポップアップHUD
         AnimatedVisibility(
             visible = activeHud != null && !isLocked,
             enter = fadeIn(),
@@ -442,6 +465,24 @@ fun MxStyleVideoPlayerScreen() {
                             fontFamily = FontFamily.Monospace
                         )
                     }
+                    GestureHudType.NOISE -> {
+                        Icon(Icons.Default.BlurOn, contentDescription = null, tint = Color(0xFF60A5FA))
+                        Text(
+                            text = noiseLevel.label,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    GestureHudType.HDR -> {
+                        Icon(Icons.Default.HdrOn, contentDescription = null, tint = Color(0xFFF472B6))
+                        Text(
+                            text = if (aiHdrEnabled) "AI HDR: ON" else "AI HDR: OFF",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                     null -> Unit
                 }
             }
@@ -482,7 +523,7 @@ fun MxStyleVideoPlayerScreen() {
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(
-                                Color.Black.copy(alpha = 0.78f),
+                                Color.Black.copy(alpha = 0.82f),
                                 Color.Transparent,
                                 Color.Black.copy(alpha = 0.85f)
                             )
@@ -570,6 +611,7 @@ fun MxStyleVideoPlayerScreen() {
                         }
                     }
 
+                    // 1段目：プリセットワンタップ切替（標準 / OLED / アニメ / 実写）
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -591,6 +633,58 @@ fun MxStyleVideoPlayerScreen() {
                                         } else {
                                             FontWeight.Normal
                                         }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    // 2段目：AI HDR ボタン ＋ ノイズフィルター（大・中・小・OFF）ボタン
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = aiHdrEnabled,
+                            onClick = {
+                                aiHdrEnabled = !aiHdrEnabled
+                                activeHud = GestureHudType.HDR
+                                interactionTick++
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Default.HdrOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                            },
+                            label = {
+                                Text(
+                                    text = if (aiHdrEnabled) "AI HDR ON" else "AI HDR",
+                                    fontSize = 12.sp,
+                                    fontWeight = if (aiHdrEnabled) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        )
+
+                        listOf(
+                            NoiseReductionLevel.LARGE,
+                            NoiseReductionLevel.MEDIUM,
+                            NoiseReductionLevel.SMALL,
+                            NoiseReductionLevel.OFF
+                        ).forEach { level ->
+                            FilterChip(
+                                selected = noiseLevel == level,
+                                onClick = {
+                                    noiseLevel = level
+                                    activeHud = GestureHudType.NOISE
+                                    interactionTick++
+                                },
+                                label = {
+                                    Text(
+                                        text = level.label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (noiseLevel == level) FontWeight.Bold else FontWeight.Normal
                                     )
                                 }
                             )
