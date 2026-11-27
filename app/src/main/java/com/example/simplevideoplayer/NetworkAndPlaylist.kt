@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.IOException
+import java.io.InputStream
 import java.io.StringReader
 import java.net.DatagramPacket
 import java.net.HttpURLConnection
@@ -95,6 +96,7 @@ class SmbMediaDataSource(
     private var session: Session? = null
     private var diskShare: DiskShare? = null
     private var smbFile: File? = null
+    private var fileInputStream: InputStream? = null
 
     private var fileSize: Long = C.LENGTH_UNSET.toLong()
     private var readPosition: Long = 0L
@@ -147,18 +149,33 @@ class SmbMediaDataSource(
                 throw IOException("シーク位置がファイルサイズを超えています ($startPos > $totalSize)")
             }
 
+            val stream = handle.inputStream
+            var skipped = 0L
+            while (skipped < startPos) {
+                val n = stream.skip(startPos - skipped)
+                if (n <= 0L) {
+                    val buf = ByteArray(minOf(8192L, startPos - skipped).toInt())
+                    val r = stream.read(buf, 0, buf.size)
+                    if (r <= 0) break
+                    skipped += r.toLong()
+                } else {
+                    skipped += n
+                }
+            }
+
             smbClient = client
             connection = conn
             session = sess
             diskShare = share
             smbFile = handle
+            fileInputStream = stream
             fileSize = totalSize
-            readPosition = startPos
+            readPosition = skipped
 
             bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                dataSpec.length.coerceAtMost(totalSize - startPos)
+                dataSpec.length.coerceAtMost(totalSize - skipped)
             } else {
-                totalSize - startPos
+                totalSize - skipped
             }
 
             opened = true
@@ -174,18 +191,16 @@ class SmbMediaDataSource(
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
 
-        val file = smbFile ?: throw IOException("SMBファイルが開かれていません")
+        val stream = fileInputStream ?: throw IOException("SMBファイルが開かれていません")
         val toRead = minOf(length.toLong(), bytesRemaining).toInt()
         if (toRead <= 0) return C.RESULT_END_OF_INPUT
 
         return try {
-            val buf = ByteArray(toRead)
-            val readBytes = file.read(buf, 0, readPosition, toRead)
+            val readBytes = stream.read(buffer, offset, toRead)
             if (readBytes <= 0) {
                 bytesRemaining = 0L
                 C.RESULT_END_OF_INPUT
             } else {
-                System.arraycopy(buf, 0, buffer, offset, readBytes)
                 readPosition += readBytes.toLong()
                 if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
                     bytesRemaining -= readBytes.toLong()
@@ -210,6 +225,8 @@ class SmbMediaDataSource(
     }
 
     private fun closeQuietly() {
+        try { fileInputStream?.close() } catch (_: Exception) {}
+        fileInputStream = null
         try { smbFile?.close() } catch (_: Exception) {}
         smbFile = null
         try { diskShare?.close() } catch (_: Exception) {}
