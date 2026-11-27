@@ -20,8 +20,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -56,7 +58,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private enum class GestureHudType {
-    BRIGHTNESS, VOLUME, SEEK, ZOOM
+    BRIGHTNESS, VOLUME, SEEK, ZOOM, PRESET
 }
 
 private enum class ViewScaleMode(val label: String, val zoomScale: Float) {
@@ -132,6 +134,16 @@ fun MxStyleVideoPlayerScreen() {
     }
     var seekPreviewMs by remember { mutableLongStateOf(0L) }
     var seekDeltaSec by remember { mutableIntStateOf(0) }
+
+    val applyPreset: (FilterPreset) -> Unit = { preset ->
+        selectedPresetLabel = preset.label
+        saturation = preset.saturation
+        contrast = preset.contrast
+        sharpness = preset.sharpness
+        blackLift = preset.blackLift
+        activeHud = GestureHudType.PRESET
+        interactionTick++
+    }
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -209,7 +221,7 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale) {
+    LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale, selectedPresetLabel) {
         if (activeHud != null) {
             delay(1200L)
             activeHud = null
@@ -421,6 +433,15 @@ fun MxStyleVideoPlayerScreen() {
                             fontFamily = FontFamily.Monospace
                         )
                     }
+                    GestureHudType.PRESET -> {
+                        Icon(Icons.Default.Tune, contentDescription = null, tint = Color(0xFFFBBF24))
+                        Text(
+                            text = "プリセット: $selectedPresetLabel",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                     null -> Unit
                 }
             }
@@ -454,339 +475,4 @@ fun MxStyleVideoPlayerScreen() {
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.fillMaxSize()
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.Black.copy(alpha = 0.72f),
-                                Color.Transparent,
-                                Color.Black.copy(alpha = 0.82f)
-                            )
-                        )
-                    )
-                    .then(if (!isFullscreen) Modifier.systemBarsPadding() else Modifier)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    IconButton(
-                        onClick = {
-                            isLocked = true
-                            controlsVisible = true
-                            interactionTick++
-                        }
-                    ) {
-                        Icon(Icons.Default.Lock, contentDescription = "画面ロック", tint = Color.White)
-                    }
-
-                    Text(
-                        text = videoTitle,
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    FilledTonalButton(
-                        onClick = {
-                            showFilterSheet = true
-                            interactionTick++
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(selectedPresetLabel, fontSize = 12.sp)
-                    }
-
-                    FilledTonalButton(
-                        onClick = {
-                            viewScaleMode = viewScaleMode.next()
-                            pinchScale = 1.0f
-                            panOffset = Offset.Zero
-                            interactionTick++
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.AspectRatio, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(viewScaleMode.label, fontSize = 12.sp)
-                    }
-
-                    IconButton(
-                        onClick = {
-                            isFullscreen = !isFullscreen
-                            interactionTick++
-                        }
-                    ) {
-                        Icon(
-                            imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = "全画面切替",
-                            tint = Color.White
-                        )
-                    }
-
-                    FilledTonalButton(
-                        onClick = { videoPickerLauncher.launch(arrayOf("video/*")) },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("開く", fontSize = 12.sp)
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.align(Alignment.Center),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(28.dp)
-                ) {
-                    IconButton(
-                        onClick = {
-                            val target = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
-                            exoPlayer.seekTo(target)
-                            currentPositionMs = target
-                            interactionTick++
-                        },
-                        modifier = Modifier
-                            .size(52.dp)
-                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Replay10,
-                            contentDescription = "10秒戻す",
-                            tint = Color.White,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
-
-                    FilledIconButton(
-                        onClick = {
-                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                            interactionTick++
-                        },
-                        modifier = Modifier.size(68.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "一時停止" else "再生",
-                            modifier = Modifier.size(38.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            val maxPos = exoPlayer.duration.coerceAtLeast(0L)
-                            val target = (exoPlayer.currentPosition + 10_000L).coerceAtMost(maxPos)
-                            exoPlayer.seekTo(target)
-                            currentPositionMs = target
-                            interactionTick++
-                        },
-                        modifier = Modifier
-                            .size(52.dp)
-                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Forward10,
-                            contentDescription = "10秒送る",
-                            tint = Color.White,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = formatTime(currentPositionMs),
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    Slider(
-                        value = if (durationMs > 0L) {
-                            (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                        } else {
-                            0f
-                        },
-                        onValueChange = { ratio ->
-                            val targetMs = (ratio * durationMs).toLong()
-                            exoPlayer.seekTo(targetMs)
-                            currentPositionMs = targetMs
-                            interactionTick++
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    Text(
-                        text = formatTime(durationMs),
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        if (showFilterSheet) {
-            FilterPresetDialog(
-                selectedPresetLabel = selectedPresetLabel,
-                saturation = saturation,
-                contrast = contrast,
-                sharpness = sharpness,
-                onSelectPreset = { preset ->
-                    selectedPresetLabel = preset.label
-                    saturation = preset.saturation
-                    contrast = preset.contrast
-                    sharpness = preset.sharpness
-                    blackLift = preset.blackLift
-                    interactionTick++
-                },
-                onSaturationChange = {
-                    saturation = it
-                    selectedPresetLabel = "カスタム"
-                    interactionTick++
-                },
-                onContrastChange = {
-                    contrast = it
-                    selectedPresetLabel = "カスタム"
-                    interactionTick++
-                },
-                onSharpnessChange = {
-                    sharpness = it
-                    selectedPresetLabel = "カスタム"
-                    interactionTick++
-                },
-                onDismiss = {
-                    showFilterSheet = false
-                    interactionTick++
-                }
-            )
-        }
-    }
-}
-
-@Composable
-private fun FilterPresetDialog(
-    selectedPresetLabel: String,
-    saturation: Float,
-    contrast: Float,
-    sharpness: Float,
-    onSelectPreset: (FilterPreset) -> Unit,
-    onSaturationChange: (Float) -> Unit,
-    onContrastChange: (Float) -> Unit,
-    onSharpnessChange: (Float) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("画質プリセット・フィルター調整") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("プリセット", style = MaterialTheme.typography.titleSmall)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    FilterPreset.entries.forEach { preset ->
-                        FilterChip(
-                            selected = selectedPresetLabel == preset.label,
-                            onClick = { onSelectPreset(preset) },
-                            label = { Text(preset.label, fontSize = 12.sp) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-
-                HorizontalDivider()
-
-                Text(
-                    text = String.format(Locale.US, "彩度: %.2f", saturation),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace
-                )
-                Slider(
-                    value = saturation,
-                    onValueChange = onSaturationChange,
-                    valueRange = 0.0f..2.0f
-                )
-
-                Text(
-                    text = String.format(Locale.US, "コントラスト: %.2f", contrast),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace
-                )
-                Slider(
-                    value = contrast,
-                    onValueChange = onContrastChange,
-                    valueRange = 0.5f..1.8f
-                )
-
-                Text(
-                    text = String.format(Locale.US, "シャープネス: %.2f", sharpness),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace
-                )
-                Slider(
-                    value = sharpness,
-                    onValueChange = onSharpnessChange,
-                    valueRange = 0.0f..1.0f
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("閉じる")
-            }
-        }
-    )
-}
-
-private fun resolveTitle(context: Context, uri: Uri): String {
-    if (uri.scheme == "content") {
-        try {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (idx >= 0) {
-                            val name = cursor.getString(idx)
-                            if (!name.isNullOrBlank()) return name
-                        }
-                    }
-                }
-        } catch (_: Exception) {
-        }
-    }
-    return uri.lastPathSegment?.substringAfterLast('/') ?: "選択した動画"
-}
-
-private fun formatTime(ms: Long): String {
-    val totalSec = (ms / 1000L).coerceAtLeast(0L)
-    val hours = totalSec / 3600L
-    val minutes = (totalSec % 3600L) / 60L
-    val seconds = totalSec % 60L
-    return if (hours > 0L) {
-        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format(Locale.US, "%02d:%02d", minutes, seconds)
-    }
-}
+        
