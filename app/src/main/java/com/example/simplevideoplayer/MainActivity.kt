@@ -50,6 +50,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -103,8 +104,23 @@ fun MxStyleVideoPlayerScreen() {
     val scope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
+    // ネットワークドライブ（SMB / DLNA）再生向けの余裕あるバッファ設定
+    val networkLoadControl = remember {
+        DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 60_000,
+                /* bufferForPlaybackMs = */ 2_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 5_000
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+    }
+
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build()
+        ExoPlayer.Builder(context)
+            .setLoadControl(networkLoadControl)
+            .build()
     }
 
     val playlist = remember { mutableStateListOf<PlaylistItem>() }
@@ -1361,6 +1377,37 @@ private fun NetworkExplorerDialog(
 
                     if (activeDevice.protocol == NetworkProtocolType.SMB) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = smbCredentials.isAnonymous,
+                                    onClick = {
+                                        onUpdateSmbCredentials(
+                                            smbCredentials.copy(
+                                                isAnonymous = true,
+                                                username = "匿名",
+                                                password = ""
+                                            )
+                                        )
+                                    },
+                                    label = { Text("匿名", fontSize = 11.sp) }
+                                )
+                                FilterChip(
+                                    selected = !smbCredentials.isAnonymous,
+                                    onClick = {
+                                        onUpdateSmbCredentials(
+                                            smbCredentials.copy(
+                                                isAnonymous = false,
+                                                username = if (smbCredentials.username == "匿名") "" else smbCredentials.username
+                                            )
+                                        )
+                                    },
+                                    label = { Text("ユーザー指定", fontSize = 11.sp) }
+                                )
+                            }
+
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 OutlinedTextField(
                                     value = smbCredentials.shareName,
@@ -1370,8 +1417,15 @@ private fun NetworkExplorerDialog(
                                     modifier = Modifier.weight(1f)
                                 )
                                 OutlinedTextField(
-                                    value = smbCredentials.username,
-                                    onValueChange = { onUpdateSmbCredentials(smbCredentials.copy(username = it)) },
+                                    value = if (smbCredentials.isAnonymous) "匿名" else smbCredentials.username,
+                                    onValueChange = {
+                                        onUpdateSmbCredentials(
+                                            smbCredentials.copy(
+                                                isAnonymous = it.isBlank() || it == "匿名",
+                                                username = it
+                                            )
+                                        )
+                                    },
                                     label = { Text("ユーザー", fontSize = 11.sp) },
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -1385,6 +1439,7 @@ private fun NetworkExplorerDialog(
                                     value = smbCredentials.password,
                                     onValueChange = { onUpdateSmbCredentials(smbCredentials.copy(password = it)) },
                                     label = { Text("パスワード", fontSize = 11.sp) },
+                                    enabled = !smbCredentials.isAnonymous,
                                     visualTransformation = PasswordVisualTransformation(),
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -1411,7 +1466,7 @@ private fun NetworkExplorerDialog(
                     }
 
                     LazyColumn(
-                        modifier = Modifier.heightIn(max = 220.dp),
+                        modifier = Modifier.heightIn(max = 200.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         itemsIndexed(entries) { _, entry ->
