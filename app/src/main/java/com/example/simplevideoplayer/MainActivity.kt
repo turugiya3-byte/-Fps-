@@ -20,6 +20,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,7 +53,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -94,11 +98,23 @@ class MainActivity : ComponentActivity() {
 fun MxStyleVideoPlayerScreen() {
     val context = LocalContext.current
     val activity = context as? Activity
+    val scope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build()
     }
+
+    // プレイリスト状態
+    val playlist = remember { mutableStateListOf<PlaylistItem>() }
+    var currentIndex by remember { mutableIntStateOf(-1) }
+    var autoPlayNext by remember { mutableStateOf(true) }
+
+    // ネットワーク検索状態（SMB / DLNA）
+    var showNetworkDialog by remember { mutableStateOf(false) }
+    var showPlaylistDialog by remember { mutableStateOf(false) }
+    var isScanningNetwork by remember { mutableStateOf(false) }
+    val discoveredDevices = remember { mutableStateListOf<DiscoveredNetworkDevice>() }
 
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
@@ -140,6 +156,37 @@ fun MxStyleVideoPlayerScreen() {
     var seekPreviewMs by remember { mutableLongStateOf(0L) }
     var seekDeltaSec by remember { mutableIntStateOf(0) }
 
+    val playItemAtIndex: (Int) -> Unit = { idx ->
+        if (idx in playlist.indices) {
+            currentIndex = idx
+            val item = playlist[idx]
+            videoTitle = item.title
+            exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(item.uriString)))
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
+            controlsVisible = true
+            interactionTick++
+        }
+    }
+
+    val addAndPlayUri: (Uri, String, String) -> Unit = { uri, title, sourceType ->
+        val existingIdx = playlist.indexOfFirst { it.uriString == uri.toString() }
+        val targetIdx = if (existingIdx >= 0) {
+            existingIdx
+        } else {
+            playlist.add(
+                PlaylistItem(
+                    id = UUID.randomUUID().toString(),
+                    title = title,
+                    uriString = uri.toString(),
+                    sourceType = sourceType
+                )
+            )
+            playlist.lastIndex
+        }
+        playItemAtIndex(targetIdx)
+    }
+
     val applyPreset: (FilterPreset) -> Unit = { preset ->
         selectedPresetLabel = preset.label
         saturation = preset.saturation
@@ -152,15 +199,35 @@ fun MxStyleVideoPlayerScreen() {
     }
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            videoTitle = resolveTitle(context, it)
-            exoPlayer.setMediaItem(MediaItem.fromUri(it))
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
-            controlsVisible = true
-            interactionTick++
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            val firstNewIndex = playlist.size
+            uris.forEach { uri ->
+                if (playlist.none { it.uriString == uri.toString() }) {
+                    playlist.add(
+                        PlaylistItem(
+                            id = UUID.randomUUID().toString(),
+                            title = resolveTitle(context, uri),
+                            uriString = uri.toString(),
+                            sourceType = "ローカル"
+                        )
+                    )
+                }
+            }
+            val targetIdx = playlist.indexOfFirst { it.uriString == uris.first().toString() }
+                .takeIf { it >= 0 } ?: firstNewIndex
+            playItemAtIndex(targetIdx)
+        }
+    }
+
+    val runNetworkScan: () -> Unit = {
+        scope.launch {
+            isScanningNetwork = true
+            discoveredDevices.clear()
+            val devices = NetworkDiscoveryManager.discoverDevices(context)
+            discoveredDevices.addAll(devices)
+            isScanningNetwork = false
         }
     }
 
@@ -194,7 +261,7 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    DisposableEffect(exoPlayer) {
+    DisposableEffect(exoPlayer, autoPlayNext) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -204,6 +271,11 @@ fun MxStyleVideoPlayerScreen() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                } else if (playbackState == Player.STATE_ENDED && autoPlayNext) {
+                    val nextIdx = currentIndex + 1
+                    if (nextIdx in playlist.indices) {
+                        playItemAtIndex(nextIdx)
+                    }
                 }
             }
         }
@@ -223,8 +295,8 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(controlsVisible, isPlaying, isLocked, showFilterSheet, interactionTick) {
-        if (controlsVisible && isPlaying && !isLocked && !showFilterSheet) {
+    LaunchedEffect(controlsVisible, isPlaying, isLocked, showFilterSheet, showPlaylistDialog, showNetworkDialog, interactionTick) {
+        if (controlsVisible && isPlaying && !isLocked && !showFilterSheet && !showPlaylistDialog && !showNetworkDialog) {
             delay(4000L)
             controlsVisible = false
         }
@@ -604,6 +676,33 @@ fun MxStyleVideoPlayerScreen() {
 
                         FilledTonalButton(
                             onClick = {
+                                showPlaylistDialog = true
+                                interactionTick++
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.QueueMusic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("リスト(${playlist.size})", fontSize = 12.sp)
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                showNetworkDialog = true
+                                if (discoveredDevices.isEmpty() && !isScanningNetwork) {
+                                    runNetworkScan()
+                                }
+                                interactionTick++
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.WifiFind, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("SMB/DLNA", fontSize = 12.sp)
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
                                 showFilterSheet = true
                                 interactionTick++
                             },
@@ -732,8 +831,28 @@ fun MxStyleVideoPlayerScreen() {
                 Row(
                     modifier = Modifier.align(Alignment.Center),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(28.dp)
+                    horizontalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
+                    IconButton(
+                        onClick = {
+                            if (currentIndex > 0) {
+                                playItemAtIndex(currentIndex - 1)
+                            }
+                            interactionTick++
+                        },
+                        enabled = currentIndex > 0,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipPrevious,
+                            contentDescription = "前の動画",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
                     IconButton(
                         onClick = {
                             val target = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
@@ -786,6 +905,26 @@ fun MxStyleVideoPlayerScreen() {
                             modifier = Modifier.size(30.dp)
                         )
                     }
+
+                    IconButton(
+                        onClick = {
+                            if (currentIndex + 1 in playlist.indices) {
+                                playItemAtIndex(currentIndex + 1)
+                            }
+                            interactionTick++
+                        },
+                        enabled = currentIndex + 1 in playlist.indices,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipNext,
+                            contentDescription = "次の動画",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
                 }
 
                 Row(
@@ -830,6 +969,49 @@ fun MxStyleVideoPlayerScreen() {
             }
         }
 
+        if (showPlaylistDialog) {
+            PlaylistDialog(
+                playlist = playlist,
+                currentIndex = currentIndex,
+                autoPlayNext = autoPlayNext,
+                onToggleAutoPlayNext = { autoPlayNext = !autoPlayNext },
+                onSelectIndex = { idx ->
+                    playItemAtIndex(idx)
+                    showPlaylistDialog = false
+                },
+                onRemoveIndex = { idx ->
+                    if (idx in playlist.indices) {
+                        playlist.removeAt(idx)
+                        if (idx == currentIndex) {
+                            currentIndex = -1
+                        } else if (idx < currentIndex) {
+                            currentIndex--
+                        }
+                    }
+                },
+                onClearAll = {
+                    playlist.clear()
+                    currentIndex = -1
+                },
+                onDismiss = { showPlaylistDialog = false }
+            )
+        }
+
+        if (showNetworkDialog) {
+            NetworkDiscoveryDialog(
+                devices = discoveredDevices,
+                isScanning = isScanningNetwork,
+                onRescan = runNetworkScan,
+                onAddStreamToPlaylist = { device, pathText ->
+                    val uri = NetworkDiscoveryManager.buildStreamUri(device, pathText)
+                    val title = pathText.trim().substringAfterLast('/').ifBlank { device.name }
+                    addAndPlayUri(uri, title, device.protocol.label)
+                    showNetworkDialog = false
+                },
+                onDismiss = { showNetworkDialog = false }
+            )
+        }
+
         if (showFilterSheet) {
             FilterPresetDialog(
                 selectedPresetLabel = selectedPresetLabel,
@@ -855,6 +1037,202 @@ fun MxStyleVideoPlayerScreen() {
             )
         }
     }
+}
+
+@Composable
+private fun PlaylistDialog(
+    playlist: List<PlaylistItem>,
+    currentIndex: Int,
+    autoPlayNext: Boolean,
+    onToggleAutoPlayNext: () -> Unit,
+    onSelectIndex: (Int) -> Unit,
+    onRemoveIndex: (Int) -> Unit,
+    onClearAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("プレイリスト (${playlist.size})")
+                FilterChip(
+                    selected = autoPlayNext,
+                    onClick = onToggleAutoPlayNext,
+                    label = { Text(if (autoPlayNext) "連続再生ON" else "連続再生OFF", fontSize = 11.sp) }
+                )
+            }
+        },
+        text = {
+            if (playlist.isEmpty()) {
+                Text("動画が登録されていません。「開く」で複数選択するか、SMB/DLNA検索から追加してください。")
+            } else {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 320.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    itemsIndexed(playlist, key = { _, item -> item.id }) { index, item ->
+                        val isCurrent = index == currentIndex
+                        Surface(
+                            color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelectIndex(index) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${index + 1}. ${item.title}",
+                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "[${item.sourceType}] ${item.uriString}",
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(onClick = { onRemoveIndex(index) }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "削除")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (playlist.isNotEmpty()) {
+                    TextButton(onClick = onClearAll) {
+                        Text("全削除")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("閉じる")
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun NetworkDiscoveryDialog(
+    devices: List<DiscoveredNetworkDevice>,
+    isScanning: Boolean,
+    onRescan: () -> Unit,
+    onAddStreamToPlaylist: (DiscoveredNetworkDevice, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedDevice by remember { mutableStateOf<DiscoveredNetworkDevice?>(null) }
+    var streamPathInput by remember { mutableStateOf("") }
+
+    LaunchedEffect(devices) {
+        if (selectedDevice == null && devices.isNotEmpty()) {
+            selectedDevice = devices.first()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("SMB / DLNA 自動検索") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isScanning) "LAN内を検索中..." else "検出された機器: ${devices.size}件",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    FilledTonalButton(
+                        onClick = onRescan,
+                        enabled = !isScanning,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("再検索", fontSize = 12.sp)
+                    }
+                }
+
+                if (isScanning) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 180.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    itemsIndexed(devices) { _, dev ->
+                        val isSelected = selectedDevice == dev
+                        Surface(
+                            color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selectedDevice = dev
+                                    streamPathInput = dev.locationOrShare
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "[${dev.protocol.label}] ${dev.name}",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = dev.locationOrShare,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = streamPathInput,
+                    onValueChange = { streamPathInput = it },
+                    label = { Text("動画パス / ストリームURL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val targetDev = selectedDevice
+                if (targetDev != null) {
+                    Button(
+                        onClick = {
+                            onAddStreamToPlaylist(targetDev, streamPathInput.ifBlank { targetDev.locationOrShare })
+                        }
+                    ) {
+                        Text("追加して再生")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("閉じる")
+                }
+            }
+        }
+    )
 }
 
 @Composable
