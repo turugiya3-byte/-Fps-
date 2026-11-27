@@ -104,10 +104,17 @@ fun MxStyleVideoPlayerScreen() {
     var controlsVisible by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
     var isFullscreen by remember { mutableStateOf(false) }
+    var showFilterSheet by remember { mutableStateOf(false) }
     var viewScaleMode by remember { mutableStateOf(ViewScaleMode.FIT) }
     var pinchScale by remember { mutableFloatStateOf(1.0f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var interactionTick by remember { mutableIntStateOf(0) }
+
+    var selectedPresetLabel by remember { mutableStateOf(FilterPreset.STANDARD.label) }
+    var saturation by remember { mutableFloatStateOf(FilterPreset.STANDARD.saturation) }
+    var contrast by remember { mutableFloatStateOf(FilterPreset.STANDARD.contrast) }
+    var sharpness by remember { mutableFloatStateOf(FilterPreset.STANDARD.sharpness) }
+    var blackLift by remember { mutableFloatStateOf(FilterPreset.STANDARD.blackLift) }
 
     var activeHud by remember { mutableStateOf<GestureHudType?>(null) }
     var brightnessLevel by remember {
@@ -137,6 +144,17 @@ fun MxStyleVideoPlayerScreen() {
             controlsVisible = true
             interactionTick++
         }
+    }
+
+    LaunchedEffect(saturation, contrast, sharpness, blackLift) {
+        val effects = buildVideoEffectsList(
+            context = context,
+            saturation = saturation,
+            contrast = contrast,
+            sharpness = sharpness,
+            blackLift = blackLift
+        )
+        exoPlayer.setVideoEffects(effects)
     }
 
     LaunchedEffect(isFullscreen) {
@@ -184,8 +202,8 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(controlsVisible, isPlaying, isLocked, interactionTick) {
-        if (controlsVisible && isPlaying && !isLocked) {
+    LaunchedEffect(controlsVisible, isPlaying, isLocked, showFilterSheet, interactionTick) {
+        if (controlsVisible && isPlaying && !isLocked && !showFilterSheet) {
             delay(4000L)
             controlsVisible = false
         }
@@ -480,6 +498,18 @@ fun MxStyleVideoPlayerScreen() {
 
                     FilledTonalButton(
                         onClick = {
+                            showFilterSheet = true
+                            interactionTick++
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(selectedPresetLabel, fontSize = 12.sp)
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
                             viewScaleMode = viewScaleMode.next()
                             pinchScale = 1.0f
                             panOffset = Offset.Zero
@@ -615,7 +645,119 @@ fun MxStyleVideoPlayerScreen() {
                 }
             }
         }
+
+        if (showFilterSheet) {
+            FilterPresetDialog(
+                selectedPresetLabel = selectedPresetLabel,
+                saturation = saturation,
+                contrast = contrast,
+                sharpness = sharpness,
+                onSelectPreset = { preset ->
+                    selectedPresetLabel = preset.label
+                    saturation = preset.saturation
+                    contrast = preset.contrast
+                    sharpness = preset.sharpness
+                    blackLift = preset.blackLift
+                    interactionTick++
+                },
+                onSaturationChange = {
+                    saturation = it
+                    selectedPresetLabel = "カスタム"
+                    interactionTick++
+                },
+                onContrastChange = {
+                    contrast = it
+                    selectedPresetLabel = "カスタム"
+                    interactionTick++
+                },
+                onSharpnessChange = {
+                    sharpness = it
+                    selectedPresetLabel = "カスタム"
+                    interactionTick++
+                },
+                onDismiss = {
+                    showFilterSheet = false
+                    interactionTick++
+                }
+            )
+        }
     }
+}
+
+@Composable
+private fun FilterPresetDialog(
+    selectedPresetLabel: String,
+    saturation: Float,
+    contrast: Float,
+    sharpness: Float,
+    onSelectPreset: (FilterPreset) -> Unit,
+    onSaturationChange: (Float) -> Unit,
+    onContrastChange: (Float) -> Unit,
+    onSharpnessChange: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("画質プリセット・フィルター調整") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("プリセット", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterPreset.entries.forEach { preset ->
+                        FilterChip(
+                            selected = selectedPresetLabel == preset.label,
+                            onClick = { onSelectPreset(preset) },
+                            label = { Text(preset.label, fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = String.format(Locale.US, "彩度: %.2f", saturation),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace
+                )
+                Slider(
+                    value = saturation,
+                    onValueChange = onSaturationChange,
+                    valueRange = 0.0f..2.0f
+                )
+
+                Text(
+                    text = String.format(Locale.US, "コントラスト: %.2f", contrast),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace
+                )
+                Slider(
+                    value = contrast,
+                    onValueChange = onContrastChange,
+                    valueRange = 0.5f..1.8f
+                )
+
+                Text(
+                    text = String.format(Locale.US, "シャープネス: %.2f", sharpness),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace
+                )
+                Slider(
+                    value = sharpness,
+                    onValueChange = onSharpnessChange,
+                    valueRange = 0.0f..1.0f
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("閉じる")
+            }
+        }
+    )
 }
 
 private fun resolveTitle(context: Context, uri: Uri): String {
