@@ -179,11 +179,13 @@ class SmbMediaDataSource(
         if (toRead <= 0) return C.RESULT_END_OF_INPUT
 
         return try {
-            val readBytes = file.read(buffer, offset, readPosition, toRead)
+            val buf = ByteArray(toRead)
+            val readBytes = file.read(buf, 0, readPosition, toRead)
             if (readBytes <= 0) {
                 bytesRemaining = 0L
                 C.RESULT_END_OF_INPUT
             } else {
+                System.arraycopy(buf, 0, buffer, offset, readBytes)
                 readPosition += readBytes.toLong()
                 if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
                     bytesRemaining -= readBytes.toLong()
