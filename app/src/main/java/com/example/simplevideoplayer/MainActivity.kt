@@ -39,6 +39,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -105,16 +106,25 @@ fun MxStyleVideoPlayerScreen() {
         ExoPlayer.Builder(context).build()
     }
 
-    // プレイリスト状態
     val playlist = remember { mutableStateListOf<PlaylistItem>() }
     var currentIndex by remember { mutableIntStateOf(-1) }
     var autoPlayNext by remember { mutableStateOf(true) }
 
-    // ネットワーク検索状態（SMB / DLNA）
     var showNetworkDialog by remember { mutableStateOf(false) }
     var showPlaylistDialog by remember { mutableStateOf(false) }
     var isScanningNetwork by remember { mutableStateOf(false) }
     val discoveredDevices = remember { mutableStateListOf<DiscoveredNetworkDevice>() }
+
+    // エクスプローラ状態
+    var activeDevice by remember { mutableStateOf<DiscoveredNetworkDevice?>(null) }
+    val explorerEntries = remember { mutableStateListOf<ExplorerEntry>() }
+    var isBrowsingExplorer by remember { mutableStateOf(false) }
+    var explorerError by remember { mutableStateOf<String?>(null) }
+    val dlnaBackStack = remember { mutableStateListOf<Pair<String, String>>() }
+    var currentDlnaId by remember { mutableStateOf("0") }
+    var currentDlnaLabel by remember { mutableStateOf("ルート") }
+    var currentSmbSubPath by remember { mutableStateOf("") }
+    var smbCredentials by remember { mutableStateOf(SmbCredentials()) }
 
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
@@ -186,6 +196,33 @@ fun MxStyleVideoPlayerScreen() {
         }
         playItemAtIndex(targetIdx)
     }
+
+    val loadExplorerDirectory: (DiscoveredNetworkDevice, String, String, SmbCredentials) -> Unit =
+        { dev, targetIdOrPath, label, creds ->
+            scope.launch {
+                activeDevice = dev
+                isBrowsingExplorer = true
+                explorerError = null
+                explorerEntries.clear()
+
+                when (dev.protocol) {
+                    NetworkProtocolType.DLNA -> {
+                        currentDlnaId = targetIdOrPath
+                        currentDlnaLabel = label
+                        NetworkDiscoveryManager.browseDlna(dev, targetIdOrPath)
+                            .onSuccess { list -> explorerEntries.addAll(list) }
+                            .onFailure { err -> explorerError = err.message ?: "DLNA一覧の取得に失敗しました" }
+                    }
+                    NetworkProtocolType.SMB -> {
+                        currentSmbSubPath = targetIdOrPath
+                        NetworkDiscoveryManager.browseSmb(dev.host, creds, targetIdOrPath)
+                            .onSuccess { list -> explorerEntries.addAll(list) }
+                            .onFailure { err -> explorerError = err.message ?: "SMB一覧の取得に失敗しました" }
+                    }
+                }
+                isBrowsingExplorer = false
+            }
+        }
 
     val applyPreset: (FilterPreset) -> Unit = { preset ->
         selectedPresetLabel = preset.label
@@ -688,6 +725,8 @@ fun MxStyleVideoPlayerScreen() {
 
                         FilledTonalButton(
                             onClick = {
+                                activeDevice = null
+                                explorerError = null
                                 showNetworkDialog = true
                                 if (discoveredDevices.isEmpty() && !isScanningNetwork) {
                                     runNetworkScan()
@@ -696,7 +735,7 @@ fun MxStyleVideoPlayerScreen() {
                             },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                         ) {
-                            Icon(Icons.Default.WifiFind, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.FolderShared, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("SMB/DLNA", fontSize = 12.sp)
                         }
@@ -998,17 +1037,68 @@ fun MxStyleVideoPlayerScreen() {
         }
 
         if (showNetworkDialog) {
-            NetworkDiscoveryDialog(
+            NetworkExplorerDialog(
                 devices = discoveredDevices,
                 isScanning = isScanningNetwork,
+                activeDevice = activeDevice,
+                entries = explorerEntries,
+                isBrowsing = isBrowsingExplorer,
+                errorMessage = explorerError,
+                currentDlnaLabel = currentDlnaLabel,
+                currentSmbSubPath = currentSmbSubPath,
+                smbCredentials = smbCredentials,
+                onUpdateSmbCredentials = { smbCredentials = it },
                 onRescan = runNetworkScan,
-                onAddStreamToPlaylist = { device, pathText ->
-                    val uri = NetworkDiscoveryManager.buildStreamUri(device, pathText)
-                    val title = pathText.trim().substringAfterLast('/').ifBlank { device.name }
-                    addAndPlayUri(uri, title, device.protocol.label)
-                    showNetworkDialog = false
+                onOpenDevice = { dev ->
+                    dlnaBackStack.clear()
+                    if (dev.protocol == NetworkProtocolType.DLNA) {
+                        loadExplorerDirectory(dev, "0", "ルート", smbCredentials)
+                    } else {
+                        loadExplorerDirectory(dev, "", "", smbCredentials)
+                    }
                 },
-                onDismiss = { showNetworkDialog = false }
+                onNavigateUp = {
+                    val dev = activeDevice ?: return@NetworkExplorerDialog
+                    if (dev.protocol == NetworkProtocolType.DLNA) {
+                        if (dlnaBackStack.isNotEmpty()) {
+                            val prev = dlnaBackStack.removeAt(dlnaBackStack.lastIndex)
+                            loadExplorerDirectory(dev, prev.first, prev.second, smbCredentials)
+                        } else {
+                            activeDevice = null
+                        }
+                    } else {
+                        if (currentSmbSubPath.isNotBlank()) {
+                            val parent = currentSmbSubPath.substringBeforeLast('/', "")
+                            loadExplorerDirectory(dev, parent, parent.ifBlank { "/" }, smbCredentials)
+                        } else {
+                            activeDevice = null
+                        }
+                    }
+                },
+                onSelectEntry = { entry ->
+                    val dev = activeDevice ?: return@NetworkExplorerDialog
+                    if (entry.isDirectory) {
+                        if (dev.protocol == NetworkProtocolType.DLNA) {
+                            dlnaBackStack.add(currentDlnaId to currentDlnaLabel)
+                            loadExplorerDirectory(dev, entry.objectIdOrPath, entry.name, smbCredentials)
+                        } else {
+                            loadExplorerDirectory(dev, entry.objectIdOrPath, entry.name, smbCredentials)
+                        }
+                    } else {
+                        entry.streamUrl?.let { urlStr ->
+                            addAndPlayUri(
+                                NetworkDiscoveryManager.buildDirectUri(urlStr),
+                                entry.name,
+                                dev.protocol.label
+                            )
+                            showNetworkDialog = false
+                        }
+                    }
+                },
+                onDismiss = {
+                    activeDevice = null
+                    showNetworkDialog = false
+                }
             )
         }
 
@@ -1068,7 +1158,7 @@ private fun PlaylistDialog(
         },
         text = {
             if (playlist.isEmpty()) {
-                Text("動画が登録されていません。「開く」で複数選択するか、SMB/DLNA検索から追加してください。")
+                Text("動画が登録されていません。「開く」で複数選択するか、SMB/DLNAエクスプローラから選んで追加してください。")
             } else {
                 LazyColumn(
                     modifier = Modifier.heightIn(max = 320.dp),
@@ -1126,110 +1216,237 @@ private fun PlaylistDialog(
 }
 
 @Composable
-private fun NetworkDiscoveryDialog(
+private fun NetworkExplorerDialog(
     devices: List<DiscoveredNetworkDevice>,
     isScanning: Boolean,
+    activeDevice: DiscoveredNetworkDevice?,
+    entries: List<ExplorerEntry>,
+    isBrowsing: Boolean,
+    errorMessage: String?,
+    currentDlnaLabel: String,
+    currentSmbSubPath: String,
+    smbCredentials: SmbCredentials,
+    onUpdateSmbCredentials: (SmbCredentials) -> Unit,
     onRescan: () -> Unit,
-    onAddStreamToPlaylist: (DiscoveredNetworkDevice, String) -> Unit,
+    onOpenDevice: (DiscoveredNetworkDevice) -> Unit,
+    onNavigateUp: () -> Unit,
+    onSelectEntry: (ExplorerEntry) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var selectedDevice by remember { mutableStateOf<DiscoveredNetworkDevice?>(null) }
-    var streamPathInput by remember { mutableStateOf("") }
-
-    LaunchedEffect(devices) {
-        if (selectedDevice == null && devices.isNotEmpty()) {
-            selectedDevice = devices.first()
-        }
-    }
-
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("SMB / DLNA 自動検索") },
+        title = {
+            Text(
+                text = if (activeDevice == null) {
+                    "SMB / DLNA 機器検索"
+                } else {
+                    "${activeDevice.name} エクスプローラ"
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isScanning) "LAN内を検索中..." else "検出された機器: ${devices.size}件",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    FilledTonalButton(
-                        onClick = onRescan,
-                        enabled = !isScanning,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+            if (activeDevice == null) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("再検索", fontSize = 12.sp)
-                    }
-                }
-
-                if (isScanning) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 180.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    itemsIndexed(devices) { _, dev ->
-                        val isSelected = selectedDevice == dev
-                        Surface(
-                            color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    selectedDevice = dev
-                                    streamPathInput = dev.locationOrShare
-                                }
+                        Text(
+                            text = if (isScanning) "LAN内のSMB/DLNAを検索中..." else "検出機器: ${devices.size}件（タップで開く）",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        FilledTonalButton(
+                            onClick = onRescan,
+                            enabled = !isScanning,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                         ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(
-                                    text = "[${dev.protocol.label}] ${dev.name}",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = dev.locationOrShare,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("再検索", fontSize = 12.sp)
+                        }
+                    }
+
+                    if (isScanning) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 260.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        itemsIndexed(devices) { _, dev ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenDevice(dev) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (dev.protocol == NetworkProtocolType.DLNA) {
+                                            Icons.Default.CastConnected
+                                        } else {
+                                            Icons.Default.Dns
+                                        },
+                                        contentDescription = null
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "[${dev.protocol.label}] ${dev.name}",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = dev.locationOrShare,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Icon(Icons.Default.ChevronRight, contentDescription = null)
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = onNavigateUp,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("上へ", fontSize = 12.sp)
+                        }
 
-                OutlinedTextField(
-                    value = streamPathInput,
-                    onValueChange = { streamPathInput = it },
-                    label = { Text("動画パス / ストリームURL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                        Text(
+                            text = if (activeDevice.protocol == NetworkProtocolType.DLNA) {
+                                "場所: $currentDlnaLabel"
+                            } else {
+                                "共有(${smbCredentials.shareName}): /${currentSmbSubPath.trim('/')}"
+                            },
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    if (activeDevice.protocol == NetworkProtocolType.SMB) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedTextField(
+                                    value = smbCredentials.shareName,
+                                    onValueChange = { onUpdateSmbCredentials(smbCredentials.copy(shareName = it)) },
+                                    label = { Text("共有名", fontSize = 11.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = smbCredentials.username,
+                                    onValueChange = { onUpdateSmbCredentials(smbCredentials.copy(username = it)) },
+                                    label = { Text("ユーザー", fontSize = 11.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = smbCredentials.password,
+                                    onValueChange = { onUpdateSmbCredentials(smbCredentials.copy(password = it)) },
+                                    label = { Text("パスワード", fontSize = 11.sp) },
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                FilledTonalButton(
+                                    onClick = { onOpenDevice(activeDevice) }
+                                ) {
+                                    Text("接続", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    if (isBrowsing) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+
+                    if (errorMessage != null) {
+                        Text(
+                            text = errorMessage,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 220.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        itemsIndexed(entries) { _, entry ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectEntry(entry) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (entry.isDirectory) {
+                                            Icons.Default.Folder
+                                        } else {
+                                            Icons.Default.Movie
+                                        },
+                                        contentDescription = null,
+                                        tint = if (entry.isDirectory) Color(0xFFFBBF24) else Color(0xFF38BDF8)
+                                    )
+                                    Text(
+                                        text = entry.name,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = if (entry.isDirectory) "開く" else "再生",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val targetDev = selectedDevice
-                if (targetDev != null) {
-                    Button(
-                        onClick = {
-                            onAddStreamToPlaylist(targetDev, streamPathInput.ifBlank { targetDev.locationOrShare })
-                        }
-                    ) {
-                        Text("追加して再生")
-                    }
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("閉じる")
-                }
+            TextButton(onClick = onDismiss) {
+                Text("閉じる")
             }
         }
     )
