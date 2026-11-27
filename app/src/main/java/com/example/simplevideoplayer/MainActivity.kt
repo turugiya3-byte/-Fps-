@@ -56,7 +56,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private enum class GestureHudType {
-    BRIGHTNESS, VOLUME, SEEK, ZOOM, PRESET, NOISE
+    BRIGHTNESS, VOLUME, SEEK, ZOOM, PRESET, NOISE, UPCONVERT
 }
 
 private enum class DragMode {
@@ -118,8 +118,10 @@ fun MxStyleVideoPlayerScreen() {
     var saturation by remember { mutableFloatStateOf(FilterPreset.STANDARD.saturation) }
     var contrast by remember { mutableFloatStateOf(FilterPreset.STANDARD.contrast) }
     var sharpness by remember { mutableFloatStateOf(FilterPreset.STANDARD.sharpness) }
+    var clarity by remember { mutableFloatStateOf(FilterPreset.STANDARD.clarity) }
     var blackLift by remember { mutableFloatStateOf(FilterPreset.STANDARD.blackLift) }
     var noiseLevel by remember { mutableStateOf(NoiseReductionLevel.OFF) }
+    var upconvertMode by remember { mutableStateOf(UpconvertMode.OFF) }
 
     var activeHud by remember { mutableStateOf<GestureHudType?>(null) }
     var brightnessLevel by remember {
@@ -143,6 +145,7 @@ fun MxStyleVideoPlayerScreen() {
         saturation = preset.saturation
         contrast = preset.contrast
         sharpness = preset.sharpness
+        clarity = preset.clarity
         blackLift = preset.blackLift
         activeHud = GestureHudType.PRESET
         interactionTick++
@@ -161,14 +164,16 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(saturation, contrast, sharpness, blackLift, noiseLevel) {
+    LaunchedEffect(saturation, contrast, sharpness, clarity, blackLift, noiseLevel, upconvertMode) {
         val effects = buildVideoEffectsList(
             context = context,
             saturation = saturation,
             contrast = contrast,
             sharpness = sharpness,
+            clarity = clarity,
             blackLift = blackLift,
-            noiseLevel = noiseLevel
+            noiseLevel = noiseLevel,
+            upconvertMode = upconvertMode
         )
         exoPlayer.setVideoEffects(effects)
     }
@@ -225,7 +230,16 @@ fun MxStyleVideoPlayerScreen() {
         }
     }
 
-    LaunchedEffect(activeHud, brightnessLevel, volumeLevel, seekPreviewMs, pinchScale, selectedPresetLabel, noiseLevel) {
+    LaunchedEffect(
+        activeHud,
+        brightnessLevel,
+        volumeLevel,
+        seekPreviewMs,
+        pinchScale,
+        selectedPresetLabel,
+        noiseLevel,
+        upconvertMode
+    ) {
         if (activeHud != null) {
             delay(1200L)
             activeHud = null
@@ -254,7 +268,6 @@ fun MxStyleVideoPlayerScreen() {
                 interactionTick++
             }
     ) {
-        // 1. 映像表示レイヤー
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -280,7 +293,6 @@ fun MxStyleVideoPlayerScreen() {
             )
         }
 
-        // 2. スワイプ（左右＝シーク、左上下＝輝度、右上下＝音量）＆ピンチ拡大レイヤー
         if (!isLocked) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val halfWidthPx = constraints.maxWidth * 0.5f
@@ -432,7 +444,6 @@ fun MxStyleVideoPlayerScreen() {
             }
         }
 
-        // 3. 中央ポップアップHUD
         AnimatedVisibility(
             visible = activeHud != null && !isLocked,
             enter = fadeIn(),
@@ -498,6 +509,15 @@ fun MxStyleVideoPlayerScreen() {
                         Icon(Icons.Default.BlurOn, contentDescription = null, tint = Color(0xFF60A5FA))
                         Text(
                             text = noiseLevel.label,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    GestureHudType.UPCONVERT -> {
+                        Icon(Icons.Default.HighQuality, contentDescription = null, tint = Color(0xFF34D399))
+                        Text(
+                            text = upconvertMode.label,
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -666,6 +686,24 @@ fun MxStyleVideoPlayerScreen() {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        UpconvertMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = upconvertMode == mode,
+                                onClick = {
+                                    upconvertMode = mode
+                                    activeHud = GestureHudType.UPCONVERT
+                                    interactionTick++
+                                },
+                                label = {
+                                    Text(
+                                        text = mode.label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (upconvertMode == mode) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
+                            )
+                        }
+
                         listOf(
                             NoiseReductionLevel.LARGE,
                             NoiseReductionLevel.MEDIUM,
@@ -798,13 +836,15 @@ fun MxStyleVideoPlayerScreen() {
                 saturation = saturation,
                 contrast = contrast,
                 sharpness = sharpness,
+                clarity = clarity,
                 onSelectPreset = { preset ->
                     applyPreset(preset)
                 },
-                onCommitValues = { newSat, newCon, newShp ->
+                onCommitValues = { newSat, newCon, newShp, newClarity ->
                     saturation = newSat
                     contrast = newCon
                     sharpness = newShp
+                    clarity = newClarity
                     selectedPresetLabel = "カスタム"
                     interactionTick++
                 },
@@ -823,22 +863,24 @@ private fun FilterPresetDialog(
     saturation: Float,
     contrast: Float,
     sharpness: Float,
+    clarity: Float,
     onSelectPreset: (FilterPreset) -> Unit,
-    onCommitValues: (saturation: Float, contrast: Float, sharpness: Float) -> Unit,
+    onCommitValues: (saturation: Float, contrast: Float, sharpness: Float, clarity: Float) -> Unit,
     onDismiss: () -> Unit
 ) {
     var draftSaturation by remember(saturation) { mutableFloatStateOf(saturation) }
     var draftContrast by remember(contrast) { mutableFloatStateOf(contrast) }
     var draftSharpness by remember(sharpness) { mutableFloatStateOf(sharpness) }
+    var draftClarity by remember(clarity) { mutableFloatStateOf(clarity) }
 
     AlertDialog(
         onDismissRequest = {
-            onCommitValues(draftSaturation, draftContrast, draftSharpness)
+            onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
             onDismiss()
         },
         title = { Text("画質プリセット・フィルター調整") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("プリセット", style = MaterialTheme.typography.titleSmall)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -851,6 +893,7 @@ private fun FilterPresetDialog(
                                 draftSaturation = preset.saturation
                                 draftContrast = preset.contrast
                                 draftSharpness = preset.sharpness
+                                draftClarity = preset.clarity
                                 onSelectPreset(preset)
                             },
                             label = { Text(preset.label, fontSize = 12.sp) },
@@ -870,7 +913,7 @@ private fun FilterPresetDialog(
                     value = draftSaturation,
                     onValueChange = { draftSaturation = it },
                     onValueChangeFinished = {
-                        onCommitValues(draftSaturation, draftContrast, draftSharpness)
+                        onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
                     },
                     valueRange = 0.0f..2.0f
                 )
@@ -884,7 +927,7 @@ private fun FilterPresetDialog(
                     value = draftContrast,
                     onValueChange = { draftContrast = it },
                     onValueChangeFinished = {
-                        onCommitValues(draftSaturation, draftContrast, draftSharpness)
+                        onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
                     },
                     valueRange = 0.5f..1.8f
                 )
@@ -898,7 +941,21 @@ private fun FilterPresetDialog(
                     value = draftSharpness,
                     onValueChange = { draftSharpness = it },
                     onValueChangeFinished = {
-                        onCommitValues(draftSaturation, draftContrast, draftSharpness)
+                        onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
+                    },
+                    valueRange = 0.0f..1.0f
+                )
+
+                Text(
+                    text = String.format(Locale.US, "明瞭度: %.2f", draftClarity),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace
+                )
+                Slider(
+                    value = draftClarity,
+                    onValueChange = { draftClarity = it },
+                    onValueChangeFinished = {
+                        onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
                     },
                     valueRange = 0.0f..1.0f
                 )
@@ -907,7 +964,7 @@ private fun FilterPresetDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onCommitValues(draftSaturation, draftContrast, draftSharpness)
+                    onCommitValues(draftSaturation, draftContrast, draftSharpness, draftClarity)
                     onDismiss()
                 }
             ) {
