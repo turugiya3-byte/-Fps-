@@ -3,13 +3,24 @@ package com.example.simplevideoplayer
 import android.content.Context
 import android.net.Uri
 import android.net.wifi.WifiManager
+import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2ShareAccess
+import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.share.DiskShare
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
+import java.io.StringReader
 import java.net.DatagramPacket
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.MulticastSocket
 import java.net.Socket
+import java.net.URL
 
 data class PlaylistItem(
     val id: String,
@@ -30,7 +41,30 @@ data class DiscoveredNetworkDevice(
     val locationOrShare: String
 )
 
+data class ExplorerEntry(
+    val name: String,
+    val isDirectory: Boolean,
+    val objectIdOrPath: String,
+    val streamUrl: String? = null
+)
+
+data class SmbCredentials(
+    val username: String = "guest",
+    val password: String = "",
+    val domain: String = "",
+    val shareName: String = "video"
+)
+
 object NetworkDiscoveryManager {
+
+    private val videoExtensions = setOf(
+        ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".wmv"
+    )
+
+    fun isVideoFileName(name: String): Boolean {
+        val lower = name.lowercase(java.util.Locale.US)
+        return videoExtensions.any { lower.endsWith(it) }
+    }
 
     suspend fun discoverDevices(context: Context): List<DiscoveredNetworkDevice> =
         withContext(Dispatchers.IO) {
@@ -98,7 +132,7 @@ object NetworkDiscoveryManager {
 
         for (lastOctet in 1..254) {
             val ip = "$subnetPrefix.$lastOctet"
-            if (isPortOpen(ip, 445, 90) || isPortOpen(ip, 139, 90)) {
+            if (isPortOpen(ip, 445, 80) || isPortOpen(ip, 139, 80)) {
                 val hostName = try {
                     InetAddress.getByName(ip).hostName ?: ip
                 } catch (_: Exception) {
@@ -149,26 +183,259 @@ object NetworkDiscoveryManager {
             ?.trim()
     }
 
-    fun buildStreamUri(device: DiscoveredNetworkDevice, customPath: String): Uri {
-        val trimmed = customPath.trim()
-        if (trimmed.startsWith("http://", true) ||
-            trimmed.startsWith("https://", true) ||
-            trimmed.startsWith("smb://", true) ||
-            trimmed.startsWith("rtsp://", true)
-        ) {
-            return Uri.parse(trimmed)
-        }
-        return when (device.protocol) {
-            NetworkProtocolType.DLNA -> {
-                val base = device.locationOrShare.substringBeforeLast("/")
-                val cleanPath = trimmed.trimStart('/')
-                Uri.parse(if (cleanPath.isBlank()) device.locationOrShare else "$base/$cleanPath")
+    // DLNA ContentDirectory 制御URL取得とディレクトリ/動画一覧取得
+    suspend fun browseDlna(
+        device: DiscoveredNetworkDevice,
+        objectId: String = "0"
+    ): Result<List<ExplorerEntry>> = withContext(Dispatchers.IO) {
+        try {
+            val controlUrl = fetchDlnaControlUrl(device.locationOrShare)
+                ?: return@withContext Result.failure(IllegalStateException("ContentDirectory 制御URLが見つかりません"))
+
+            val soapBody = """
+                <?xml version="1.0" encoding="utf-8"?>
+                <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+                  <s:Body>
+                    <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+                      <ObjectID>$objectId</ObjectID>
+                      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+                      <Filter>*</Filter>
+                      <StartingIndex>0</StartingIndex>
+                      <RequestedCount>200</RequestedCount>
+                      <SortCriteria></SortCriteria>
+                    </u:Browse>
+                  </s:Body>
+                </s:Envelope>
+            """.trimIndent()
+
+            val conn = (URL(controlUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 4000
+                readTimeout = 5000
+                doOutput = true
+                setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
+                setRequestProperty("SOAPACTION", "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"")
             }
-            NetworkProtocolType.SMB -> {
-                val cleanPath = trimmed.trimStart('/')
-                val base = if (cleanPath.isBlank()) device.locationOrShare else "smb://${device.host}/$cleanPath"
-                Uri.parse(base)
+            conn.outputStream.use { it.write(soapBody.toByteArray(Charsets.UTF_8)) }
+
+            val responseXml = conn.inputStream.bufferedReader().use { it.readText() }
+            val didlLiteXml = extractDidlLiteResult(responseXml)
+            val entries = parseDidlLiteEntries(didlLiteXml)
+            Result.success(entries)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun fetchDlnaControlUrl(locationUrl: String): String? {
+        val conn = (URL(locationUrl).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 3500
+            readTimeout = 4000
+        }
+        val xmlText = conn.inputStream.bufferedReader().use { it.readText() }
+        val baseUri = URL(locationUrl)
+
+        val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+            setInput(StringReader(xmlText))
+        }
+        var eventType = parser.eventType
+        var inService = false
+        var serviceType = ""
+        var controlUrl = ""
+        var currentTag = ""
+
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            when (eventType) {
+                XmlPullParser.START_TAG -> {
+                    currentTag = parser.name ?: ""
+                    if (currentTag.equals("service", ignoreCase = true)) {
+                        inService = true
+                        serviceType = ""
+                        controlUrl = ""
+                    }
+                }
+                XmlPullParser.TEXT -> {
+                    if (inService) {
+                        val txt = parser.text?.trim().orEmpty()
+                        when {
+                            currentTag.equals("serviceType", ignoreCase = true) -> serviceType = txt
+                            currentTag.equals("controlURL", ignoreCase = true) -> controlUrl = txt
+                        }
+                    }
+                }
+                XmlPullParser.END_TAG -> {
+                    val tag = parser.name ?: ""
+                    if (tag.equals("service", ignoreCase = true) && inService) {
+                        if (serviceType.contains("ContentDirectory", ignoreCase = true) && controlUrl.isNotBlank()) {
+                            return URL(baseUri, controlUrl).toString()
+                        }
+                        inService = false
+                    }
+                    currentTag = ""
+                }
+            }
+            eventType = parser.next()
+        }
+        return null
+    }
+
+    private fun extractDidlLiteResult(soapXml: String): String {
+        val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+            setInput(StringReader(soapXml))
+        }
+        var eventType = parser.eventType
+        var currentTag = ""
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            when (eventType) {
+                XmlPullParser.START_TAG -> currentTag = parser.name ?: ""
+                XmlPullParser.TEXT -> {
+                    if (currentTag.equals("Result", ignoreCase = true)) {
+                        return parser.text.orEmpty()
+                    }
+                }
+                XmlPullParser.END_TAG -> currentTag = ""
+            }
+            eventType = parser.next()
+        }
+        return ""
+    }
+
+    private fun parseDidlLiteEntries(didlXml: String): List<ExplorerEntry> {
+        if (didlXml.isBlank()) return emptyList()
+        val entries = mutableListOf<ExplorerEntry>()
+        val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+            setInput(StringReader(didlXml))
+        }
+        var eventType = parser.eventType
+        var inContainer = false
+        var inItem = false
+        var id = ""
+        var title = ""
+        var resUrl = ""
+        var currentTag = ""
+
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            when (eventType) {
+                XmlPullParser.START_TAG -> {
+                    currentTag = parser.name ?: ""
+                    when {
+                        currentTag.equals("container", ignoreCase = true) -> {
+                            inContainer = true
+                            id = parser.getAttributeValue(null, "id").orEmpty()
+                            title = ""
+                        }
+                        currentTag.equals("item", ignoreCase = true) -> {
+                            inItem = true
+                            id = parser.getAttributeValue(null, "id").orEmpty()
+                            title = ""
+                            resUrl = ""
+                        }
+                    }
+                }
+                XmlPullParser.TEXT -> {
+                    val txt = parser.text?.trim().orEmpty()
+                    if (inContainer && currentTag.endsWith("title", ignoreCase = true)) {
+                        title = txt
+                    } else if (inItem) {
+                        if (currentTag.endsWith("title", ignoreCase = true)) {
+                            title = txt
+                        } else if (currentTag.endsWith("res", ignoreCase = true) && resUrl.isBlank()) {
+                            resUrl = txt
+                        }
+                    }
+                }
+                XmlPullParser.END_TAG -> {
+                    val tag = parser.name ?: ""
+                    if (tag.equals("container", ignoreCase = true) && inContainer) {
+                        entries.add(
+                            ExplorerEntry(
+                                name = title.ifBlank { "フォルダ ($id)" },
+                                isDirectory = true,
+                                objectIdOrPath = id.ifBlank { "0" }
+                            )
+                        )
+                        inContainer = false
+                    } else if (tag.equals("item", ignoreCase = true) && inItem) {
+                        if (resUrl.isNotBlank()) {
+                            entries.add(
+                                ExplorerEntry(
+                                    name = title.ifBlank { resUrl.substringAfterLast('/') },
+                                    isDirectory = false,
+                                    objectIdOrPath = id,
+                                    streamUrl = resUrl
+                                )
+                            )
+                        }
+                        inItem = false
+                    }
+                    currentTag = ""
+                }
+            }
+            eventType = parser.next()
+        }
+        return entries
+    }
+
+    // SMB 共有フォルダ内のディレクトリ・動画一覧取得
+    suspend fun browseSmb(
+        host: String,
+        credentials: SmbCredentials,
+        subPath: String = ""
+    ): Result<List<ExplorerEntry>> = withContext(Dispatchers.IO) {
+        val client = SMBClient()
+        try {
+            client.connect(host).use { connection ->
+                val authCtx = if (credentials.username.isBlank() || credentials.username.equals("guest", true)) {
+                    AuthenticationContext.anonymous()
+                } else {
+                    AuthenticationContext(
+                        credentials.username,
+                        credentials.password.toCharArray(),
+                        credentials.domain
+                    )
+                }
+                val session = connection.authenticate(authCtx)
+                (session.connectShare(credentials.shareName) as DiskShare).use { share ->
+                    val normalizedPath = subPath.trim('/')
+                    val list = share.list(normalizedPath)
+                        .filter { info ->
+                            val name = info.fileName
+                            name != "." && name != ".."
+                        }
+                        .mapNotNull { info ->
+                            val name = info.fileName
+                            val isDir = (info.fileAttributes and 0x10L) != 0L
+                            val nextRelPath = if (normalizedPath.isBlank()) name else "$normalizedPath/$name"
+                            if (isDir) {
+                                ExplorerEntry(
+                                    name = name,
+                                    isDirectory = true,
+                                    objectIdOrPath = nextRelPath
+                                )
+                            } else if (isVideoFileName(name)) {
+                                ExplorerEntry(
+                                    name = name,
+                                    isDirectory = false,
+                                    objectIdOrPath = nextRelPath,
+                                    streamUrl = "smb://$host/${credentials.shareName}/$nextRelPath"
+                                )
+                            } else {
+                                null
+                            }
+                        }
+                        .sortedWith(compareBy<ExplorerEntry> { !it.isDirectory }.thenBy { it.name.lowercase(java.util.Locale.US) })
+                    Result.success(list)
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try {
+                client.close()
+            } catch (_: Exception) {
             }
         }
     }
+
+    fun buildDirectUri(rawPath: String): Uri = Uri.parse(rawPath.trim())
 }
