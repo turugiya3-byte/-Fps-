@@ -43,8 +43,7 @@ private class ImageEnhanceEffect(
     private val saturation: Float,
     private val sharpness: Float,
     private val blackLift: Float,
-    private val noiseStrength: Float,
-    private val aiHdrEnabled: Boolean
+    private val noiseStrength: Float
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram {
@@ -53,8 +52,7 @@ private class ImageEnhanceEffect(
             saturation = saturation,
             sharpness = sharpness,
             blackLift = blackLift,
-            noiseStrength = noiseStrength,
-            aiHdrEnabled = aiHdrEnabled
+            noiseStrength = noiseStrength
         )
     }
 
@@ -64,8 +62,7 @@ private class ImageEnhanceEffect(
         return saturation == other.saturation &&
             sharpness == other.sharpness &&
             blackLift == other.blackLift &&
-            noiseStrength == other.noiseStrength &&
-            aiHdrEnabled == other.aiHdrEnabled
+            noiseStrength == other.noiseStrength
     }
 
     override fun hashCode(): Int {
@@ -73,7 +70,6 @@ private class ImageEnhanceEffect(
         result = 31 * result + sharpness.hashCode()
         result = 31 * result + blackLift.hashCode()
         result = 31 * result + noiseStrength.hashCode()
-        result = 31 * result + aiHdrEnabled.hashCode()
         return result
     }
 }
@@ -84,8 +80,7 @@ private class ImageEnhanceShaderProgram(
     private val saturation: Float,
     private val sharpness: Float,
     private val blackLift: Float,
-    private val noiseStrength: Float,
-    private val aiHdrEnabled: Boolean
+    private val noiseStrength: Float
 ) : BaseGlShaderProgram(useHdr, 1) {
 
     private val vertexShaderCode = """
@@ -111,39 +106,60 @@ private class ImageEnhanceShaderProgram(
         uniform float uSharpness;
         uniform float uBlackLift;
         uniform float uNoiseStrength;
-        uniform float uAiHdr;
+
+        // ブロックノイズ軽減（8pxマクロブロック境界の段差緩和＋エッジ保持）
+        vec3 applyDeblockFilter(vec2 uv, vec2 texel, float strength) {
+            vec3 c = texture(uTexSampler, uv).rgb;
+            if (strength <= 0.001) return c;
+
+            vec2 pixelCoord = uv / texel;
+            // 8x8 ブロック境界への近さ（0.0 = 境界上, 1.0 = ブロック中央）
+            vec2 blockMod = mod(pixelCoord, 8.0);
+            vec2 distToBoundary = min(blockMod, 8.0 - blockMod);
+            float boundaryWeightX = 1.0 - smoothstep(0.0, 2.0, distToBoundary.x);
+            float boundaryWeightY = 1.0 - smoothstep(0.0, 2.0, distToBoundary.y);
+            float boundaryBoost = max(boundaryWeightX, boundaryWeightY);
+
+            vec3 n = texture(uTexSampler, uv + vec2(0.0, -texel.y)).rgb;
+            vec3 s = texture(uTexSampler, uv + vec2(0.0,  texel.y)).rgb;
+            vec3 w = texture(uTexSampler, uv + vec2(-texel.x, 0.0)).rgb;
+            vec3 e = texture(uTexSampler, uv + vec2( texel.x, 0.0)).rgb;
+
+            vec3 w2 = texture(uTexSampler, uv + vec2(-2.0 * texel.x, 0.0)).rgb;
+            vec3 e2 = texture(uTexSampler, uv + vec2( 2.0 * texel.x, 0.0)).rgb;
+            vec3 n2 = texture(uTexSampler, uv + vec2(0.0, -2.0 * texel.y)).rgb;
+            vec3 s2 = texture(uTexSampler, uv + vec2(0.0,  2.0 * texel.y)).rgb;
+
+            // ブロック境界をまたぐ平均（横・縦・広域）
+            vec3 hAvg = (w2 + w + c + e + e2) / 5.0;
+            vec3 vAvg = (n2 + n + c + s + s2) / 5.0;
+            vec3 deblockAvg = mix(c, (hAvg + vAvg) * 0.5, 0.5 + 0.5 * boundaryBoost);
+
+            // 強い本物の輪郭は残し、弱いブロック段差だけを抑える
+            float localDiff = length(deblockAvg - c);
+            float edgeKeep = 1.0 - smoothstep(0.06, 0.28, localDiff);
+            float effectiveBlend = clamp(strength * (0.45 + 0.55 * boundaryBoost) * edgeKeep, 0.0, 0.92);
+
+            return mix(c, deblockAvg, effectiveBlend);
+        }
 
         void main() {
-            vec3 c = texture(uTexSampler, vTexCoords).rgb;
+            vec3 deblocked = applyDeblockFilter(vTexCoords, uTexelSize, uNoiseStrength);
+
             vec3 n = texture(uTexSampler, vTexCoords + vec2(0.0, -uTexelSize.y)).rgb;
             vec3 s = texture(uTexSampler, vTexCoords + vec2(0.0,  uTexelSize.y)).rgb;
             vec3 w = texture(uTexSampler, vTexCoords + vec2(-uTexelSize.x, 0.0)).rgb;
             vec3 e = texture(uTexSampler, vTexCoords + vec2( uTexelSize.x, 0.0)).rgb;
 
-            vec3 nw = texture(uTexSampler, vTexCoords + vec2(-uTexelSize.x, -uTexelSize.y)).rgb;
-            vec3 ne = texture(uTexSampler, vTexCoords + vec2( uTexelSize.x, -uTexelSize.y)).rgb;
-            vec3 sw = texture(uTexSampler, vTexCoords + vec2(-uTexelSize.x,  uTexelSize.y)).rgb;
-            vec3 se = texture(uTexSampler, vTexCoords + vec2( uTexelSize.x,  uTexelSize.y)).rgb;
-
-            vec3 box9 = (c + n + s + w + e + nw + ne + sw + se) / 9.0;
-            float diffMag = length(box9 - c);
-            float edgePreserve = clamp(1.0 - diffMag * 3.5, 0.15, 1.0);
-            vec3 denoised = mix(c, box9, clamp(uNoiseStrength * 0.85 * edgePreserve, 0.0, 0.85));
-
+            // シャープネス適用（ブロックノイズ除去後の映像をくっきりさせる）
             vec3 crossAvg = (n + s + w + e) * 0.25;
-            vec3 sharpened = denoised + (denoised - crossAvg) * (uSharpness * 1.5);
+            vec3 sharpened = deblocked + (deblocked - crossAvg) * (uSharpness * 1.5);
 
-            vec3 hdrAdjusted = sharpened;
-            if (uAiHdr > 0.5) {
-                vec3 shadowLift = pow(clamp(hdrAdjusted, 0.0, 1.0), vec3(0.78));
-                vec3 sCurve = shadowLift / (shadowLift + vec3(0.18)) * 1.18;
-                float hdrLuma = dot(sCurve, vec3(0.2126, 0.7152, 0.0722));
-                hdrAdjusted = mix(vec3(hdrLuma), sCurve, 1.22);
-            }
+            // 彩度調整
+            float luma = dot(sharpened, vec3(0.2126, 0.7152, 0.0722));
+            vec3 satColor = mix(vec3(luma), sharpened, uSaturation);
 
-            float luma = dot(hdrAdjusted, vec3(0.2126, 0.7152, 0.0722));
-            vec3 satColor = mix(vec3(luma), hdrAdjusted, uSaturation);
-
+            // 黒浮き抑制
             vec3 lifted = max(satColor - vec3(uBlackLift), vec3(0.0));
             if (uBlackLift > 0.001) {
                 lifted = lifted / max(1.0 - uBlackLift, 0.05);
@@ -187,7 +203,7 @@ private class ImageEnhanceShaderProgram(
             GLES20.glAttachShader(prog, fs)
             GLES20.glBindAttribLocation(prog, 0, "aFramePosition")
             GLES20.glBindAttribLocation(prog, 1, "aTexCoords")
-            GLES20.glLinkProgram(prog)
+            GLES30.glLinkProgram(prog)
             val linkStatus = IntArray(1)
             GLES30.glGetProgramiv(prog, GLES30.GL_LINK_STATUS, linkStatus, 0)
             if (linkStatus[0] == 0) {
@@ -208,7 +224,7 @@ private class ImageEnhanceShaderProgram(
         GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
         if (compiled[0] == 0) {
             val info = GLES20.glGetShaderInfoLog(shader)
-            GLES20.glDeleteShader(shader)
+            GLES30.glDeleteShader(shader)
             throw RuntimeException("Compile failed: $info")
         }
         return shader
@@ -243,9 +259,6 @@ private class ImageEnhanceShaderProgram(
         val noiseLoc = GLES20.glGetUniformLocation(program, "uNoiseStrength")
         if (noiseLoc >= 0) GLES20.glUniform1f(noiseLoc, noiseStrength)
 
-        val hdrLoc = GLES20.glGetUniformLocation(program, "uAiHdr")
-        if (hdrLoc >= 0) GLES20.glUniform1f(hdrLoc, if (aiHdrEnabled) 1.0f else 0.0f)
-
         quadBuffer.position(0)
         GLES20.glEnableVertexAttribArray(0)
         GLES20.glVertexAttribPointer(0, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
@@ -276,8 +289,7 @@ fun buildVideoEffectsList(
     contrast: Float,
     sharpness: Float,
     blackLift: Float,
-    noiseLevel: NoiseReductionLevel,
-    aiHdrEnabled: Boolean
+    noiseLevel: NoiseReductionLevel
 ): List<Effect> {
     val result = mutableListOf<Effect>()
     val media3Contrast = (contrast - 1.0f).coerceIn(-0.9f, 0.9f)
@@ -288,8 +300,7 @@ fun buildVideoEffectsList(
     val needsCustomGl = abs(saturation - 1.0f) > 0.005f ||
         abs(sharpness) > 0.005f ||
         abs(blackLift) > 0.001f ||
-        noiseLevel != NoiseReductionLevel.OFF ||
-        aiHdrEnabled
+        noiseLevel != NoiseReductionLevel.OFF
 
     if (needsCustomGl) {
         result.add(
@@ -297,8 +308,7 @@ fun buildVideoEffectsList(
                 saturation = saturation,
                 sharpness = sharpness,
                 blackLift = blackLift,
-                noiseStrength = noiseLevel.strength,
-                aiHdrEnabled = aiHdrEnabled
+                noiseStrength = noiseLevel.strength
             )
         )
     }
