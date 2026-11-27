@@ -17,8 +17,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -289,113 +287,144 @@ fun MxStyleVideoPlayerScreen() {
                 val dragHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f) * 0.65f
                 val dragWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f) * 0.75f
 
-                // 1本指ドラッグ：横方向＝早送り・巻き戻し、縦方向＝左：輝度 / 右：音量
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .pointerInput(isLocked, durationMs, maxVolume, pinchScale) {
-                            var startPos = Offset.Zero
-                            var startSeekMs = 0L
-                            var totalDx = 0f
-                            var totalDy = 0f
-                            var mode = DragMode.NONE
+                            awaitPointerEventScope {
+                                var mode = DragMode.NONE
+                                var startX = 0f
+                                var startSeekMs = 0L
+                                var totalDx = 0f
+                                var totalDy = 0f
+                                var isPinching = false
+                                var prevCentroid = Offset.Zero
+                                var prevSpan = 0f
 
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    startPos = offset
-                                    startSeekMs = exoPlayer.currentPosition.coerceAtLeast(0L)
-                                    seekPreviewMs = startSeekMs
-                                    seekDeltaSec = 0
-                                    totalDx = 0f
-                                    totalDy = 0f
-                                    mode = DragMode.NONE
-                                },
-                                onDragEnd = {
-                                    if (mode == DragMode.SEEK && durationMs > 0L) {
-                                        exoPlayer.seekTo(seekPreviewMs)
-                                        currentPositionMs = seekPreviewMs
-                                    }
-                                    mode = DragMode.NONE
-                                },
-                                onDragCancel = {
-                                    mode = DragMode.NONE
-                                },
-                                onDrag = { change, dragAmount ->
-                                    if (pinchScale > 1.05f) {
-                                        change.consume()
-                                        panOffset = Offset(
-                                            x = (panOffset.x + dragAmount.x).coerceIn(-600f, 600f),
-                                            y = (panOffset.y + dragAmount.y).coerceIn(-400f, 400f)
-                                        )
-                                        return@detectDragGestures
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val pressedChanges = event.changes.filter { it.pressed }
+
+                                    if (pressedChanges.isEmpty()) {
+                                        if (mode == DragMode.SEEK && durationMs > 0L) {
+                                            exoPlayer.seekTo(seekPreviewMs)
+                                            currentPositionMs = seekPreviewMs
+                                        }
+                                        mode = DragMode.NONE
+                                        isPinching = false
+                                        totalDx = 0f
+                                        totalDy = 0f
+                                        continue
                                     }
 
-                                    change.consume()
-                                    totalDx += dragAmount.x
-                                    totalDy += dragAmount.y
+                                    if (pressedChanges.size >= 2) {
+                                        mode = DragMode.NONE
+                                        val p1 = pressedChanges[0].position
+                                        val p2 = pressedChanges[1].position
+                                        val centroid = (p1 + p2) * 0.5f
+                                        val span = (p1 - p2).getDistance().coerceAtLeast(1f)
 
-                                    if (mode == DragMode.NONE) {
-                                        val threshold = 18f
-                                        if (abs(totalDx) > threshold || abs(totalDy) > threshold) {
-                                            mode = if (abs(totalDx) > abs(totalDy) * 1.25f) {
-                                                DragMode.SEEK
-                                            } else if (startPos.x < halfWidthPx) {
-                                                DragMode.BRIGHTNESS
+                                        if (!isPinching) {
+                                            isPinching = true
+                                            prevCentroid = centroid
+                                            prevSpan = span
+                                        } else {
+                                            val zoomFactor = span / prevSpan
+                                            val nextZoom = (pinchScale * zoomFactor).coerceIn(1.0f, 3.0f)
+                                            pinchScale = nextZoom
+                                            if (nextZoom > 1.01f) {
+                                                val panDelta = centroid - prevCentroid
+                                                panOffset = Offset(
+                                                    x = (panOffset.x + panDelta.x).coerceIn(-600f, 600f),
+                                                    y = (panOffset.y + panDelta.y).coerceIn(-400f, 400f)
+                                                )
                                             } else {
-                                                DragMode.VOLUME
+                                                panOffset = Offset.Zero
                                             }
+                                            prevCentroid = centroid
+                                            prevSpan = span
+                                            activeHud = GestureHudType.ZOOM
                                         }
+
+                                        pressedChanges.forEach { it.consume() }
+                                        continue
                                     }
 
-                                    when (mode) {
-                                        DragMode.SEEK -> {
-                                            if (durationMs > 0L) {
-                                                val deltaMs = ((totalDx / dragWidthPx) * 60_000f).toLong()
-                                                val nextMs = (startSeekMs + deltaMs).coerceIn(0L, durationMs)
-                                                seekPreviewMs = nextMs
-                                                seekDeltaSec = ((nextMs - startSeekMs) / 1000L).toInt()
-                                                activeHud = GestureHudType.SEEK
-                                            }
-                                        }
-                                        DragMode.BRIGHTNESS -> {
-                                            val delta = -dragAmount.y / dragHeightPx
-                                            val next = (brightnessLevel + delta).coerceIn(0.05f, 1.0f)
-                                            brightnessLevel = next
-                                            activity?.window?.let { win ->
-                                                val params = win.attributes
-                                                params.screenBrightness = next
-                                                win.attributes = params
-                                            }
-                                            activeHud = GestureHudType.BRIGHTNESS
-                                        }
-                                        DragMode.VOLUME -> {
-                                            val delta = -dragAmount.y / dragHeightPx
-                                            val next = (volumeLevel + delta).coerceIn(0.0f, 1.0f)
-                                            volumeLevel = next
-                                            val targetVol = (next * maxVolume).roundToInt().coerceIn(0, maxVolume)
-                                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
-                                            activeHud = GestureHudType.VOLUME
-                                        }
-                                        DragMode.NONE -> Unit
-                                    }
-                                }
-                            )
-                        }
-                )
+                                    isPinching = false
+                                    val pointer = pressedChanges.first()
+                                    val delta = pointer.position - pointer.previousPosition
 
-                // 2本指ピンチ拡大
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(isLocked) {
-                            detectTransformGestures { _, _, zoom, _ ->
-                                if (zoom != 1.0f) {
-                                    val nextZoom = (pinchScale * zoom).coerceIn(1.0f, 3.0f)
-                                    pinchScale = nextZoom
-                                    if (nextZoom <= 1.01f) {
-                                        panOffset = Offset.Zero
+                                    if (pointer.previousPressed.not()) {
+                                        startX = pointer.position.x
+                                        startSeekMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                                        seekPreviewMs = startSeekMs
+                                        seekDeltaSec = 0
+                                        totalDx = 0f
+                                        totalDy = 0f
+                                        mode = DragMode.NONE
                                     }
-                                    activeHud = GestureHudType.ZOOM
+
+                                    if (delta != Offset.Zero) {
+                                        if (pinchScale > 1.05f) {
+                                            panOffset = Offset(
+                                                x = (panOffset.x + delta.x).coerceIn(-600f, 600f),
+                                                y = (panOffset.y + delta.y).coerceIn(-400f, 400f)
+                                            )
+                                            pointer.consume()
+                                            continue
+                                        }
+
+                                        totalDx += delta.x
+                                        totalDy += delta.y
+
+                                        if (mode == DragMode.NONE) {
+                                            val slop = 14f
+                                            if (abs(totalDx) > slop || abs(totalDy) > slop) {
+                                                mode = if (abs(totalDx) > abs(totalDy) * 1.2f) {
+                                                    DragMode.SEEK
+                                                } else if (startX < halfWidthPx) {
+                                                    DragMode.BRIGHTNESS
+                                                } else {
+                                                    DragMode.VOLUME
+                                                }
+                                            }
+                                        }
+
+                                        when (mode) {
+                                            DragMode.SEEK -> {
+                                                if (durationMs > 0L) {
+                                                    val seekDeltaMs = ((totalDx / dragWidthPx) * 60_000f).toLong()
+                                                    val nextMs = (startSeekMs + seekDeltaMs).coerceIn(0L, durationMs)
+                                                    seekPreviewMs = nextMs
+                                                    seekDeltaSec = ((nextMs - startSeekMs) / 1000L).toInt()
+                                                    activeHud = GestureHudType.SEEK
+                                                }
+                                                pointer.consume()
+                                            }
+                                            DragMode.BRIGHTNESS -> {
+                                                val bDelta = -delta.y / dragHeightPx
+                                                val next = (brightnessLevel + bDelta).coerceIn(0.05f, 1.0f)
+                                                brightnessLevel = next
+                                                activity?.window?.let { win ->
+                                                    val params = win.attributes
+                                                    params.screenBrightness = next
+                                                    win.attributes = params
+                                                }
+                                                activeHud = GestureHudType.BRIGHTNESS
+                                                pointer.consume()
+                                            }
+                                            DragMode.VOLUME -> {
+                                                val vDelta = -delta.y / dragHeightPx
+                                                val next = (volumeLevel + vDelta).coerceIn(0.0f, 1.0f)
+                                                volumeLevel = next
+                                                val targetVol = (next * maxVolume).roundToInt().coerceIn(0, maxVolume)
+                                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
+                                                activeHud = GestureHudType.VOLUME
+                                                pointer.consume()
+                                            }
+                                            DragMode.NONE -> Unit
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -602,7 +631,6 @@ fun MxStyleVideoPlayerScreen() {
                         }
                     }
 
-                    // 1段目：プリセットワンタップ切替（標準 / OLED / アニメ / 実写）
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -630,7 +658,6 @@ fun MxStyleVideoPlayerScreen() {
                         }
                     }
 
-                    // 2段目：ノイズフィルター（大・中・小・OFF）ボタン
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
