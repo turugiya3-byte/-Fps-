@@ -51,6 +51,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
@@ -115,7 +116,6 @@ fun MxStyleVideoPlayerScreen() {
     var isScanningNetwork by remember { mutableStateOf(false) }
     val discoveredDevices = remember { mutableStateListOf<DiscoveredNetworkDevice>() }
 
-    // エクスプローラ状態
     var activeDevice by remember { mutableStateOf<DiscoveredNetworkDevice?>(null) }
     val explorerEntries = remember { mutableStateListOf<ExplorerEntry>() }
     var isBrowsingExplorer by remember { mutableStateOf(false) }
@@ -125,6 +125,10 @@ fun MxStyleVideoPlayerScreen() {
     var currentDlnaLabel by remember { mutableStateOf("ルート") }
     var currentSmbSubPath by remember { mutableStateOf("") }
     var smbCredentials by remember { mutableStateOf(SmbCredentials()) }
+
+    val smbDataSourceFactory = remember(smbCredentials) {
+        SmbMediaDataSourceFactory(smbCredentials)
+    }
 
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
@@ -170,8 +174,15 @@ fun MxStyleVideoPlayerScreen() {
         if (idx in playlist.indices) {
             currentIndex = idx
             val item = playlist[idx]
+            val uri = Uri.parse(item.uriString)
             videoTitle = item.title
-            exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(item.uriString)))
+            if (uri.scheme.equals("smb", ignoreCase = true)) {
+                val mediaSource = ProgressiveMediaSource.Factory(smbDataSourceFactory)
+                    .createMediaSource(MediaItem.fromUri(uri))
+                exoPlayer.setMediaSource(mediaSource)
+            } else {
+                exoPlayer.setMediaItem(MediaItem.fromUri(uri))
+            }
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true
             controlsVisible = true
